@@ -524,14 +524,23 @@ class Bot:
         """加百应达人微信 (src/prm/friend_adds.py): the admin handler (``add_friend_checked``; no friend manager, as on the
         Mac: nothing is added there, the number can be copied), the auto-accept service (its pause stops every add)
         and the admin's notifier; the admin's commands.  三方群 (src/prm/three_party.py): the admin handler
-        (``create_group_checked``), the auto-accept service and the backend.  Without the PRM nothing is wired."""
+        (``create_group_checked``), the auto-accept service and the backend.  接手任何合作群 (src/prm/group_link.py): the
+        admin's 「接群」 commands.  Without the PRM nothing is wired."""
         if prm is None:
             return
         prm.friend_adds.attach(admin_handler, self._auto_friend, self._admin_notifier(config, backend))
         admin_handler.set_friend_adds(prm.friend_adds)
+        # 接手任何合作群 (src/prm/group_link.py): the admin's 接群 / 是 N / 不接 / 不接群
+        links = getattr(prm, "group_links", None)
+        if links is not None:
+            admin_handler.set_group_links(links)
         # 三方群 (src/prm/three_party.py): the same friend manager and breaker, the backend for her chat's name and
         # for the new group in the database
         prm.three_party.attach(admin_handler, self._auto_friend, backend)
+        # 合作单指令 (src/prm/admin_commands.py, PRM_WECHAT_COMMANDS): 做手卡 / 补发货盘 / 签收 … <达人>; off: not handed over
+        commands = getattr(prm, "deal_commands", None)
+        if commands is not None and commands.on:
+            admin_handler.set_deal_commands(commands)
 
     @staticmethod
     def _admin_notifier(config, backend):
@@ -561,8 +570,12 @@ class Bot:
         # When the bot only relays, the admin's management commands still go to the
         # admin handler (route step admin_command), not to the Mac.
         is_command = getattr(getattr(router, "_admin", None), "is_command", None)
+        # 合作单指令 (src/prm/admin_commands.py): named in the help too while PRM_WECHAT_COMMANDS and the copilot are on
+        deal_help = ""
+        if getattr(config, "prm_copilot", "off") == "on" and getattr(config, "prm_wechat_commands", "off") == "on":
+            from .prm.admin_commands import RELAY_LINE as deal_help
         relay = ClaudeRelay(config, send=backend.send_text, send_file=getattr(backend, "send_file", None),
-                            reserved=is_command, extra_help=RELAY_HELP if is_command else "")
+                            reserved=is_command, extra_help=RELAY_HELP + deal_help if is_command else "")
         try:
             relay.start()
         except OSError:
@@ -596,6 +609,12 @@ class Bot:
         prm = PrmService(config, relay, send=backend.send_text, send_file=getattr(backend, "send_file", None),
                          on_parties_changed=getattr(backend, "refresh_private_chats_soon", None),
                          scrub_messages=getattr(store, "rewrite_chat", None))
+        if prm.wechat_review.on:                   # 微信里审批草稿: the last thing the bot said in the admin's chat, and when
+            for name, hook in (("set_sent_hook", prm.wechat_review.note_sent),           # WeChat shows it
+                               ("set_read_back_hook", prm.wechat_review.note_read_back)):
+                setter = getattr(backend, name, None)
+                if callable(setter):
+                    setter(hook)
         set_filter = getattr(backend, "set_private_filter", None)
         if callable(set_filter):
             set_filter(prm.is_party_chat)

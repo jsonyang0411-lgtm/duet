@@ -51,11 +51,19 @@ export const ackPlatform = (id) => decide(id, 'ack')
 export const partyAction = (body) => post('/api/prm/parties', body)
 export const dealAction = (body) => post('/api/prm/deals', body)
 // 起草备注 (the deal action draft_note, 2026-10-31): what the operators tell the Mac about this creator; every draft of
-// hers (the 开场白 too) follows it. Saved empty, it is cleared; the bot collapses whitespace and keeps at most 300 characters.
+// hers (the 开场白 too) follows it. Saved empty, it is cleared; the bot collapses each line's blanks, drops empty lines,
+// keeps the line breaks (2026-11-09) and at most 300 characters. It confirms no hat for a sample order (「对过图了」 does).
 export const DRAFT_NOTE_MAX = 300
-/** The note as the bot keeps it (whitespace collapsed): its length is what the limit counts. */
-export const draftNoteText = (text) => String(text || '').split(/\s+/).filter(Boolean).join(' ')
+/** The note as the bot keeps it (store.draft_note_text): its length is what the limit counts. */
+export const draftNoteText = (text) => String(text || '').split(/\r\n|\r|\n/)
+  .map((line) => line.split(/\s+/).filter(Boolean).join(' ')).filter(Boolean).join('\n')
+/** How the operators let a sample order's hat go that the Mac could not check by photo (PRM_DRAFT_CONTEXT): not here. */
+export const CONFIRM_HINT = '寄样单里没对过图的那顶不在备注里确认：对过图后，在控制台这份草稿上点这顶旁边的「对过图了」'
 export const saveDraftNote = (dealId, text) => dealAction({ deal_id: dealId, action: 'draft_note', text: draftNoteText(text) })
+// 「对过图了」 (PRM_DRAFT_CONTEXT, 2026-11-09): a hat the Mac held for photos on a waiting sample order, confirmed for the
+// deal after comparing the pictures (the next 「重新预览」 takes it), and its 「撤销」.
+export const photoConfirm = (dealId, packetId, code) => dealAction({ deal_id: dealId, action: 'photo_confirm', packet: packetId, code })
+export const photoUnconfirm = (dealId, code) => dealAction({ deal_id: dealId, action: 'photo_unconfirm', code })
 /** 自动模式 (POST /api/prm/auto): the 下班时段 rules at any hour, until switched off. */
 export const setAutoMode = (on) => post('/api/prm/auto', { on })
 /** The full numbers behind a creator's placeholders; every look is written down (8.2). */
@@ -136,7 +144,8 @@ export function bossGroupsLine(bg) {
 
 export const MODE_TAGS = { copilot: 'cy', human: 'warn', paused: 'off' }
 /** Who did it (deal_events.actor). */
-export const ACTORS = { console: '控制台', system: '系统', operator: '运营（微信里）', creator: '达人', mac: 'Mac' }
+export const ACTORS = { console: '控制台', system: '系统', operator: '运营（微信里）', creator: '达人', mac: 'Mac',
+  admin: '管理员（微信里）' }
 
 /** One audit line: "改阶段 意向沟通 → 已寄出" etc. */
 export function eventText(ev, stages = {}, modes = {}, shipmentStates = {}) {
@@ -215,6 +224,22 @@ export function bossGroupNotes(d) {
   const why = pending.some((g) => g?.why)
   return [['warn', `老板拉了 ${pending.length} 个新群，${why ? '要你看一眼' : '群里不止一个人可能是她'}：`
     + '到「合作单」页顶上的「老板拉的群」里选哪个是她，选了机器人才接手。']]
+}
+
+/** 微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py; ``wechat_review`` of GET /api/prm): [note kind, the line]
+ *  at the top of 待审批, or null while the switch is off. The drafts waiting here also go to the admin's WeChat, where
+ *  the admin answers them (a platform action: 「执行」); why they cannot (no ADMIN_WXID, the bot stopped) when they
+ *  cannot; the drafts that may or may not have reached it (``unsure``), could not be told (``unsent``) or were waiting
+ *  before the switch was first on (``older``): this page's. */
+export function wechatReviewNote(d) {
+  const w = d?.wechat_review
+  if (!w?.on) return null
+  if (w.why) return ['warn', w.why]
+  const more = []
+  if (w.unsure > 0) more.push(`有 ${w.unsure} 份发到微信时机器人停了（或者出错），不确定管理员收到没有：微信里没看到的请在这里处理`)
+  if (w.unsent > 0) more.push(`有 ${w.unsent} 份试了几次都没发到微信，请在这里处理`)
+  if (w.older > 0) more.push(`打开开关以前就在等的 ${w.older} 份没发到微信，请在这里处理`)
+  return ['', `草稿也发到管理员微信里了：引用通知回 1 发出、2 不发、改 + 你的话，带平台动作的回「执行」${more.map((m) => `；${m}`).join('')}`]
 }
 
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */

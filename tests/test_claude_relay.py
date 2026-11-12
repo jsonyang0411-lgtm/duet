@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -181,6 +182,117 @@ class TestStore:
         store.reset_session("chat")
         store.add("chat", ME, "y")
         assert store.claim_next()["session_id"] is None
+
+    def test_a_write_whose_commit_fails_is_rolled_back_before_its_error_goes_on(self):
+        """A commit refused after the INSERT (SQLite busy, the disk full) left the transaction open: the next claim or
+        the next write's commit made the job real, its caller told it was not queued (微信里审批草稿, third verification
+        item 1: a platform write approved twice).  Every write rolls back before its error goes on."""
+        store = RelayStore(":memory:")
+        real = store._conn
+
+        class CommitFailsOnce:
+            def __init__(self):
+                self.armed = True
+
+            def commit(self):
+                if self.armed:
+                    self.armed = False
+                    raise sqlite3.OperationalError("database is locked")
+                return real.commit()
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        store._conn = CommitFailsOnce()
+        with pytest.raises(sqlite3.OperationalError):
+            store.add("chat", ME, "一", now=1)
+        store._conn = real
+        assert not real.in_transaction and store.claim_next(now=2) is None
+        job = store.add("chat", ME, "二", now=3)
+        assert [j["id"] for j in store.list_jobs()] == [job]
+        store._conn = CommitFailsOnce()
+        with pytest.raises(sqlite3.OperationalError):
+            store.append_pending("chat", "admin", "三", ready_at=9)
+        store._conn = real
+        assert not real.in_transaction and store.get(job)["text"] == "二" and store.get(job)["ready_at"] is None
+
+    def test_a_heartbeat_that_brings_a_lost_job_back_is_committed(self):
+        """Fourth verification of 微信里审批草稿 (item 4, probe e2): a lost job's heartbeat made it running again without a
+        commit (only the running branch had one), and the next write that failed (rolled back since ``_tx``) put it
+        back to lost, its 失联 notice owed a second time."""
+        store = RelayStore(":memory:")
+        job = store.add("chat", ME, "任务", now=1)
+        store.claim_next(now=2)
+        assert store.mark_lost(older_than=10) == [job]
+        assert store.heartbeat(job, now=3) == {"cancel": False}
+        assert not store._conn.in_transaction
+        real = store._conn
+
+        class CommitFails:
+            def commit(self):
+                raise sqlite3.OperationalError("database is locked")
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        store._conn = CommitFails()
+        with pytest.raises(sqlite3.OperationalError):
+            store.add("chat", ME, "另一个", now=4)
+        store._conn = real
+        assert (store.get(job)["status"], store.get(job)["delivered"]) == ("running", 1)
+        assert store.undelivered() == []
+
+    def test_no_write_of_a_jobs_life_leaves_its_transaction_open(self):
+        """Every write commits what it changed: one left open would be rolled back with the next write that fails."""
+        store = RelayStore(":memory:")
+
+        def done(value=None):
+            assert not store._conn.in_transaction
+            return value
+
+        job = done(store.add("chat", ME, "一", now=1))
+        done(store.append_pending("chat", "admin", "补一句", ready_at=1))
+        done(store.claim_next(now=2))
+        done(store.heartbeat(job, now=3, progress={"steps": 1, "doing": "读文件", "plan": []}))
+        done(store.add_followup("chat", "再补一句", now=4))
+        done(store.followups(job, 0))
+        ask = done(store.add_ask(job, "Bash", "rm -rf build", now=5, expires_at=6))
+        done(store.mark_ask_sent(ask))
+        done(store.settle_ask(ask, "allow", now=5))
+        other = done(store.add_ask(job, "Bash", "ls", now=5, expires_at=6))
+        done(store.expire_asks(now=7))
+        done(store.mark_ask_noted(other))
+        done(store.cancel_asks(job, now=7))
+        done(store.add_result_note(job, files=1))
+        done(store.note_progress_sent(job, "读文件", now=8))
+        done(store.mark_lost(older_than=100))
+        done(store.heartbeat(job, now=101))
+        done(store.close_input(job, 0))
+        done(store.take_leftovers(job))
+        done(store.finish(job, ok=True, text="做完了", session_id="s1", now=102))
+        done(store.mark_delivered(job, "done"))
+        done(store.replace_result(job, "（只留统计）"))
+        done(store.set_project("chat", "webot", now=103))
+        done(store.reset_session("chat", now=104))
+        done(store.rewrite_chat("chat", "admin", lambda text: text.replace("一", "壹")))
+        prm = done(store.add("chat", ME, "", kind="prm", meta={"op": "platform_execute", "key": "k" * 32}, now=105))
+        done(store.claim_next(now=106, kinds=("prm",)))
+        done(store.add_outfile(prm, "图.jpg", "/tmp/none.jpg", 10, "0" * 64, 5))
+        done(store.cancel(prm, now=107))
+        queued = done(store.add("chat", ME, "三", now=108))
+        done(store.cancel_if_pending(queued, now=109))
+        assert done(store.job_with_key("k" * 32))["id"] == prm
+
+    def test_a_job_is_found_by_its_approval_key(self):
+        """``job_with_key``: the job of an approved platform execution (``meta.key``), never one that only has the key's
+        letters somewhere else."""
+        store = RelayStore(":memory:")
+        key, other = "a" * 32, "b" * 32
+        store.add("chat", ME, "", kind="prm", meta={"op": "platform_preview", "packet_id": 1})
+        job = store.add("chat", ME, "", kind="prm", meta={"op": "platform_execute", "packet_id": 1, "key": key})
+        store.add("chat", ME, f"文字里有 {other}", kind="prm", meta={"op": "platform_preview", "note": other + "c"})
+        assert store.job_with_key(key)["id"] == job
+        assert store.job_with_key(other) is None and store.job_with_key("") is None
 
 
 # ── WeChat side ───────────────────────────────────────────────────────────
@@ -413,7 +525,9 @@ class TestHttp:
         assert self.call(url + "/relay/health", token=None)[0] == 401
         assert self.call(url + "/relay/health", token="wrong")[0] == 401
         assert self.call(url + "/relay/jobs/1/result", "POST", {}, token="x" * 32)[0] == 401
-        assert self.call(url + "/relay/health") == (200, {"ok": True, "kinds": ["admin", "prm"]})
+        assert self.call(url + "/relay/health") == (200, {"ok": True, "kinds": ["admin", "prm"],
+                                                          "operator_files": True,   # (PRM_DRAFT_CONTEXT's channel)
+                                                          "features": []})
 
     def test_a_job_round_trip(self, server, clock, sent):
         relay, url = server

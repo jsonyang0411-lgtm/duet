@@ -26,13 +26,17 @@ AUTO_ACCEPT_COMMANDS = {                 # whitespace-normalised text -> switch 
 FRIEND_ADDS_COMMANDS = ("待加达人", "待加的达人")
 FRIEND_ADD_COMMAND = re.compile(r"^(不加达人|加达人)\s*#?\s*(\d{1,9})$")
 NO_FRIEND_ADDS = "加百应达人微信没打开（要达人副驾驶和 PRM_FRIEND_ADD）"
+# 接手任何合作群 (src/prm/group_link.py): 「接群」, 「接群 N / 群名」, 「是 N」, 「不接」, 「不接群 群名」, 「确认接群 群名」
+GROUP_LINK_COMMAND = re.compile(r"^(?:不|确认)?接群")
+NO_GROUP_LINKS = "接群要先打开达人副驾驶（PRM_COPILOT）"
 
 
 # The management commands in one line each: the Claude relay's help lists them when the
 # bot only relays (CLAUDE_RELAY_ONLY=on), where this handler's own help does not fit.
 RELAY_HELP = (
     "管理命令（只有管理员能用，不会交给 Mac）：\n"
-    "查状态 / 添加好友 号码 [备注=名字] [附言] / 同意好友 / 自动同意好友 开|关 / 待加达人 / 加达人 编号 / 不加达人 编号"
+    "查状态 / 添加好友 号码 [备注=名字] [附言] / 同意好友 / 自动同意好友 开|关 / 待加达人 / 加达人 编号 / 不加达人 编号\n"
+    "接群 / 接群 编号或群名 / 不接群 群名 / 确认接群 群名（接手一个合作群：她在群里说的话起草；确认机器人自动接的群是她的）"
 )
 
 HELP_TEXT = (
@@ -43,9 +47,21 @@ HELP_TEXT = (
     "  自动同意好友 开 / 关        切换后台自动同意功能\n"
     "  待加达人                    百应达人留的、还没加的微信（号码打码）\n"
     "  加达人 <编号> / 不加达人 <编号>  发一次好友申请 / 记成不加\n"
+    "  接群 / 接群 <编号或群名>    接手一个合作群：选谁是达人，她在群里说的话起草（不接群 <群名> 停掉）\n"
+    "  确认接群 <群名>             机器人自动接的群确认是她的（确认以前那里的草稿都等你看）\n"
     "  帮助 / help                 显示本帮助\n"
     "开了中转时，cc 开头的私聊转给 Mac 上的 Claude Code（cc 帮助 看中转命令）"
 )
+_HELP_SELF = "\n  帮助 / help"
+
+
+def help_text(extra: str = "") -> str:
+    """The admin's 「帮助」: HELP_TEXT, with ``extra`` (合作单指令's ``HELP_LINE`` while PRM_WECHAT_COMMANDS is on) among
+    the commands, right before 帮助's own line (merge 2026-11-11: each feature's commands listed once, in one list)."""
+    if not extra:
+        return HELP_TEXT
+    head, sep, tail = HELP_TEXT.partition(_HELP_SELF)
+    return head + extra + sep + tail
 
 
 class AdminCommandHandler:
@@ -57,6 +73,10 @@ class AdminCommandHandler:
       同意好友 / 通过好友        → 立即检查并同意所有待处理的好友申请
       自动同意好友 开 / 关      → 切换后台自动同意开关
       待加达人 / 加达人 N / 不加达人 N → 加百应达人微信（src/prm/friend_adds.py）的记录、发一次申请、不加
+      接群 / 接群 N|群名 / 是 N / 不接 / 不接群 群名 / 确认接群 群名 → 接手任何合作群（src/prm/group_link.py；「是 N」
+                                 「不接」只在问着的时候算命令；确认接群：群自己接上 PRM_GROUPS_AUTO_LINK）
+      做手卡 / 补发货盘 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 <达人>、指令、选 N → 合作单指令
+                                 （src/prm/admin_commands.py，PRM_WECHAT_COMMANDS 开着时；「选 N」只在问着的时候算命令）
       帮助 / help / 命令        → show help text
 
     Usage:
@@ -76,6 +96,8 @@ class AdminCommandHandler:
         self._auto_friend = auto_friend_service
         self._status = status
         self._friend_adds = None
+        self._group_links = None
+        self._deal_commands = None
 
     def set_friend_manager(self, friend_manager, auto_friend_service=None) -> None:
         """Attach or update the FriendManager and AutoFriendService instances."""
@@ -91,25 +113,48 @@ class AdminCommandHandler:
         """加百应达人微信 (src/prm/friend_adds.py ``FriendAdds``) for 待加达人 / 加达人 N / 不加达人 N."""
         self._friend_adds = friend_adds
 
+    def set_group_links(self, group_links) -> None:
+        """接手任何合作群 (src/prm/group_link.py ``GroupLinks``) for 接群 / 是 N / 不接 / 不接群."""
+        self._group_links = group_links
+
+    def set_deal_commands(self, deal_commands) -> None:
+        """合作单指令 (src/prm/admin_commands.py ``DealCommands``, PRM_WECHAT_COMMANDS on) for 做手卡 <达人> … / 指令 / 选 N."""
+        self._deal_commands = deal_commands
+
     @property
     def can_add_friends(self) -> bool:
         """There is a friend manager to drive the WeChat window (加百应达人微信 shows its button only then)."""
         return self._friend is not None
 
-    def handle(self, content: str) -> str | None:
+    def handle(self, content: str, msg: Optional[dict] = None) -> str | None:
         """Parse and execute an admin command. Returns reply text or None.
 
         Args:
             content: The message text (the backend's ``wxid_…:`` quote prefix removed).
+            msg: The message itself (the route step ``admin_command``): 合作单指令 runs only typed text in the
+                admin's own chat (a voice message or a quote is told to type it); the other commands do not look.
 
         Returns:
             Reply text if the content was a recognized command, else None.
         """
         content = content.strip()
         if content in HELP_COMMANDS:
-            return HELP_TEXT
-        command = self._command(content)
+            return help_text(self._deal_commands.help_line if self._deal_commands is not None else "")
+        command = self._command(content, msg)
         return command() if command is not None else None
+
+    def redaction(self, content: str, msg: Optional[dict] = None) -> Optional[str]:
+        """What the decision trace keeps instead of this line (the route step ``admin_command``): 合作单指令's
+        ``DealCommands.trace_text`` for a line of theirs (names, a note's words: never in data/decision_trace.jsonl,
+        as the review's step redacts its answers); None for every other line (kept as before)."""
+        commands = self._deal_commands
+        if commands is None:
+            return None
+        try:
+            return commands.trace_text if commands.admin_command(content.strip(), msg) is not None else None
+        except Exception:
+            logger.exception("ADMIN: could not tell whether a line is a 合作单指令")
+            return None
 
     def is_command(self, content: str) -> bool:
         """A management command (not the help), recognised without running it.
@@ -119,8 +164,8 @@ class AdminCommandHandler:
         """
         return self._command(content.strip()) is not None
 
-    def _command(self, content: str):
-        """The management command ``content`` is, as ``run()``; else None."""
+    def _command(self, content: str, msg: Optional[dict] = None):
+        """The management command ``content`` is, as ``run()``; else None (``msg``: the message, for 合作单指令)."""
         if content in STATUS_COMMANDS:
             return self._cmd_status
         # ── Friend commands (they drive the WeChat window and take seconds) ──
@@ -137,6 +182,14 @@ class AdminCommandHandler:
         if match:
             add, add_id = match.group(1) == "加达人", int(match.group(2))
             return lambda: self._cmd_friend_add(add, add_id)
+        if self._deal_commands is not None:        # (「选 N」 only while its list is open)
+            command = self._deal_commands.admin_command(content, msg)
+            if command is not None:
+                return command
+        if self._group_links is not None:          # (「是 N」 and 「不接」 only while its question is open)
+            return self._group_links.admin_command(content)
+        if GROUP_LINK_COMMAND.match(content):
+            return lambda: NO_GROUP_LINKS
         return None
 
     # ── Command implementations ────────────────────────────────────

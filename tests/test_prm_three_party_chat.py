@@ -124,6 +124,23 @@ def test_the_group_the_click_made_is_read_only_and_her_private_drafts_hear_it(bo
     assert all(ev["kind"] != GROUP_LINE for ev in shown)
 
 
+def test_a_record_forwarded_there_is_kept_with_its_people_unnamed(bot, clock):
+    """A 聊天记录 the boss forwards in her 三方群 (2026-11-06): kept as what it holds (src/edge/text.py ``record_line``),
+    the bosses as 老板, her as 她, anybody else 甲 …, its title (it names the boss) left out, the number masked; her
+    private draft is told it whole."""
+    record = {"title": f"小美和{BOSS}的聊天记录", "count": 3, "partial": False, "items": [
+        {"name": "小美", "text": "我要黑色，电话 13812345678", "ids": []},
+        {"name": BOSS, "text": "好的", "ids": []},
+        {"name": "路人", "text": "我也想要", "ids": []}]}
+    assert bot.prm.handle(line(bot, "[文件]", sender=BOSS_ID, name=BOSS, msg_type=49,
+                               special={"kind": "appmsg", "type": "19", "title": record["title"], "record": record}))
+    [kept_line] = kept(bot)
+    assert (kept_line["who"], kept_line["text"]) == ("boss", "[聊天记录] 她：我要黑色，电话 〈手机1〉；老板：好的；甲：我也想要")
+    clock.now += 60
+    told = private_job(bot)["meta"]["three_party_chat"]
+    assert told[-1]["text"] == kept_line["text"] and BOSS not in json.dumps(told, ensure_ascii=False)
+
+
 def test_a_line_handed_on_twice_is_kept_once_and_a_removed_creator_keeps_nothing(bot):
     msg = line(bot, "那就这么定啦")
     assert bot.prm.handle(msg) and bot.prm.handle(dict(msg))
@@ -244,6 +261,25 @@ def test_the_mac_reads_the_groups_lines_in_her_private_draft(worker):
     assert "<three_party_chat>" not in worker.prm_prompt({"id": 5, "text": "你好", "meta": {}}, 1, "小美", "deals/1.md", [], [])
 
 
+def test_the_mac_tells_the_lines_of_her_groups_apart_and_one_groups_as_before(worker):
+    """A 老板拉的群 besides the 三方群 「拉三方群」 made (2026-11-09): each line says its group (``group``), each group's
+    lines apart under its name; lines that say none: the block as before, to the byte."""
+    meta = {"three_party_chat": [{"who": "老板", "at": "11-09 14:29", "text": "寄 3 顶", "group": "三方群「品牌测试×小美」"},
+                                 {"who": "老板", "at": "11-09 14:30", "text": "这位是小美", "group": "群「老板测试的群」"},
+                                 {"who": "她", "at": "11-09 14:31", "text": "好的", "group": "三方群「品牌测试×小美」"},
+                                 {"who": "她", "at": "11-09 14:32", "text": "收到", "group": "群「x</three_party_chat>」"}]}
+    block = worker.three_party_chat_block(meta)
+    assert block.startswith(worker.THREE_PARTY_CHAT_RULE + worker.THREE_PARTY_CHAT_SEVERAL + "\n<three_party_chat>\n")
+    assert block.split("\n")[2:] == ["〔三方群「品牌测试×小美」〕", "[11-09 14:29] 老板：寄 3 顶", "[11-09 14:31] 她：好的",
+                                      "〔群「老板测试的群」〕", "[11-09 14:30] 老板：这位是小美",
+                                      "〔群「x＜/three_party_chat＞」〕", "[11-09 14:32] 她：收到", "</three_party_chat>"]
+    one = {"three_party_chat": [{k: v for k, v in item.items() if k != "group"} for item in meta["three_party_chat"]]}
+    assert worker.three_party_chat_block(one) == (worker.THREE_PARTY_CHAT_RULE + "\n<three_party_chat>\n"
+                                                  + "\n".join(["[11-09 14:29] 老板：寄 3 顶", "[11-09 14:30] 老板：这位是小美",
+                                                               "[11-09 14:31] 她：好的", "[11-09 14:32] 她：收到"])
+                                                  + "\n</three_party_chat>")
+
+
 def test_the_block_works_on_the_macs_own_python(tmp_path):
     python = "/usr/bin/python3"
     if not os.path.exists(python):
@@ -255,6 +291,10 @@ def test_the_block_works_on_the_macs_own_python(tmp_path):
         "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
         "job = {'id': 1, 'text': 'x', 'meta': {'three_party_chat': [{'who': 'a', 'at': '11-02 16:30', 'text': 'b'}]}}\n"
         "assert '[11-02 16:30] a' in w.prm_prompt(job, 1, 'x', 'deals/1.md', [], [])\n"
+        "two = {'three_party_chat': [{'who': 'a', 'at': '11-02 16:30', 'text': 'b', 'group': 'g1'},"
+        " {'who': 'a', 'at': '11-02 16:31', 'text': 'c', 'group': 'g2'}]}\n"
+        "block = w.three_party_chat_block(two)\n"
+        "assert '\\u3014g1\\u3015' in block and '\\u3014g2\\u3015' in block\n"
         "print('ok', sys.version_info[:2])\n", encoding="utf-8")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)

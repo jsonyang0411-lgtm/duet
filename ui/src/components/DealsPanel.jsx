@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check, HandWaving,
-  UsersThree, Copy, PencilSimple, Package,
+  UsersThree, Copy, PencilSimple, Package, IdentificationCard,
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
 import {
   usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS, DRAFT_NOTE_MAX, draftNoteText,
+  CONFIRM_HINT,
   saveDraftNote, bossIntroduced,
 } from '../lib/prm'
 import { PageHead, Card, Note, Empty, Field, TextInput, TextArea, Select, Seg, Confirm } from './ui'
 import { AdvancedFields } from './AdvancedPanel'
 import { FriendAddPasteCard } from './FriendAddCard'
-import { BossGroupsCard } from './BossGroupsCard'
+import { BossGroupsCard, othersLine } from './BossGroupsCard'
 
 // 合作单: the creators whose private messages get drafted replies (PRM_COPILOT).
 // Registering one here means the creator agreed to be contacted on WeChat; their
@@ -23,6 +24,9 @@ import { BossGroupsCard } from './BossGroupsCard'
 // 自动模式 on (switched on 待审批): one warn line at the top says so.
 // 老板拉的群 (PRM_BOSS_GROUPS): the card at the top (BossGroupsCard.jsx); a creator taken over from such a group is
 // tagged 老板介绍 in the list, and her deal's 三方群 block says 老板拉的群 (``three_party.by`` "boss").
+// 接手任何合作群 (2026-11-09): a group the admin linked by hand (「接群」 in WeChat) says 手动接的群 instead: in her 三方群
+// block when it is her 三方群 (``by`` "manual": the boss is in it), else in a line of its own (``deal.linked_groups``) with
+// 「不接了」 (deal action ``group_unlink``).
 
 export default function DealsPanel() {
   const { data, err, reload } = usePrm(6000)
@@ -255,11 +259,12 @@ function DealDetail({ p, d, onDone }) {
   // A change made elsewhere (AI suggestion adopted, a waybill, another console) shows up here.
   useEffect(() => setStage(deal.stage), [deal.stage])
   useEffect(() => setStatus(deal.shipment?.status || 'transit'), [deal.shipment?.status])
+  // ``done``: the toast, or a function of the bot's answer that gives it (「不接了」: is the group read now)
   const run = async (body, done) => {
     setBusy(true)
     try {
-      await dealAction({ deal_id: deal.id, ...body })
-      toast.ok(done)
+      const out = await dealAction({ deal_id: deal.id, ...body })
+      toast.ok(typeof done === 'function' ? done(out || {}) : done)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
@@ -307,7 +312,7 @@ function DealDetail({ p, d, onDone }) {
         </div>
       </div>
 
-      <DraftNoteBlock p={p} onDone={onDone} />
+      <DraftNoteBlock p={p} onDone={onDone} photoCheck={!!d?.draft_context} />
 
       {(!deal.last_message_at || deal.unanswered) && (
         <div className="stack prm-opening" style={{ gap: 6 }}>
@@ -349,7 +354,13 @@ function DealDetail({ p, d, onDone }) {
         </div>
       </div>
 
+      {/* 直播手卡 (the deal action handcards, PRM_HANDCARDS, 2026-11-09): the Mac makes her cards, a person looks first */}
+      {d?.handcards && <HandcardsBlock p={p} busy={busy} run={run} />}
+
       {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
+      {(deal.linked_groups || []).length > 0 && <LinkedGroups groups={deal.linked_groups} bg={d?.boss_groups} busy={busy} run={run} />}
+      {(deal.unconfirmed_groups || []).length > 0 && <UnconfirmedGroups groups={deal.unconfirmed_groups} busy={busy} run={run} />}
+      {deal.reach && <ReachLine reach={deal.reach} />}
 
       <div className="stack" style={{ gap: 6 }}>
         <b>寄样</b>
@@ -427,8 +438,10 @@ function DealDetail({ p, d, onDone }) {
 
 /** 起草备注 (the deal action draft_note, 2026-10-31): what the operators tell the Mac about this creator, say her WeChat
  *  signature's 「直接发链接和 brief、不接语音」. Every draft of hers follows it, the 开场白 too; unlike her 备注 (which the
- *  bot writes for a friend it registered) only an operator writes it. Saved empty, it is cleared; an error stays here. */
-function DraftNoteBlock({ p, onDone }) {
+ *  bot writes for a friend it registered) only an operator writes it. Saved empty, it is cleared; an error stays here.
+ *  ``photoCheck`` (PRM_DRAFT_CONTEXT on, ``draft_context`` of GET /api/prm): the hint that a held hat is confirmed with
+ *  「对过图了」 on its draft, never in the note. */
+function DraftNoteBlock({ p, onDone, photoCheck }) {
   const toast = useToast()
   const saved = p.deal.draft_note || ''
   const [editing, setEditing] = useState(false)
@@ -453,6 +466,8 @@ function DraftNoteBlock({ p, onDone }) {
   return (
     <div className="stack prm-draft-note" style={{ gap: 6 }}>
       <b>起草备注</b>
+      {/* PRM_DRAFT_CONTEXT only (review C-8): with the switch off no sample order holds a hat for photos */}
+      {photoCheck && <span className="f-hint prm-confirm-hint">{CONFIRM_HINT}</span>}
       {editing ? (
         <>
           <Field hint={`${hint}。空着保存就是清掉。`} error={error}>
@@ -479,11 +494,115 @@ function DraftNoteBlock({ p, onDone }) {
   )
 }
 
+/** 接手任何合作群 (2026-11-09): the groups the admin linked to her by hand that are not her 三方群 (no boss in them, or
+ *  her deal has a 三方群 of its own): each says it is drafted in, and 「不接了」 stops it (deal action ``group_unlink``).
+ *  One the bot's own scan linked (群自己接上, ``auto``) says so. */
+function LinkedGroups({ groups, bg, busy, run }) {
+  return (
+    <div className="stack prm-linked-groups" style={{ gap: 6 }}>
+      <b>手动接的群</b>
+      {groups.map((g) => (
+        <div key={g.chat} className="row prm-linked-group" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span><UsersThree style={{ verticalAlign: -2 }} /> 「{g.name || '（没有群名）'}」（{fmtClock(g.at)} {g.auto ? '机器人自动接的' : '接手'}）</span>
+          <span className="f-hint">她在群里说的话照常起草，回复发在群里，群里的人都看得到；{othersLine(bg)}</span>
+          <button type="button" className="btn sm ghost" disabled={busy}
+            onClick={() => run({ action: 'group_unlink', chat: g.chat }, `记下了：「${g.name || '这个群'}」不接了，群里的话不再起草`)}>不接了</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** PRM_REACH_LAST_SPOKE (2026-11-11; a creator with a linked group): where what the bot starts itself for her would go now
+ *  (a shipping notice, a 专属佣金 step, 写开场白 / 补发货盘 / 做手卡, 签收后问一句) and why (``deal.reach``). */
+const REACH_KINDS = '机器人主动发的消息（发货通知、专属佣金、写开场白、补发货盘、做手卡、签收后问一句）'
+function reachText(r) {
+  if (!r) return ''
+  if (r.where === 'none') return `${REACH_KINDS}现在发不出去：她不是我们的微信好友，也不在接手的群里了。`
+  if (r.where === 'group') {
+    const why = r.why === 'last_spoke' ? '她那边最近是在这个群里说的话' : '她没有和我们的私聊'
+    return `${REACH_KINDS}现在发在群「${r.name || '（没有群名）'}」里：${why}，群里的人都看得到。`
+  }
+  const why = r.why === 'unknown' ? '机器人现在读不出她有没有私聊，先按私聊算' : r.why === 'never' ? '她还没说过话' : r.why === 'elsewhere' ? '她最近说话的那个群机器人现在不在里面起草（她退了群，或者群不接了）'
+    : '她最近是在私聊里说的话'
+  return `${REACH_KINDS}现在发在她的私聊里：${why}。`
+}
+
+/** 群自己接上 (review 2026-11-11 #2): a group the scan linked by itself that nobody confirmed: every draft there waits;
+ *  「是她的群」 confirms it (deal action ``group_confirm``; the admin's 「确认接群 群名」 and a draft sent by a person do too). */
+function UnconfirmedGroups({ groups, busy, run }) {
+  return (
+    <div className="stack prm-unconfirmed-groups" style={{ gap: 6 }}>
+      {groups.map((g) => (
+        <div key={g.chat} className="row prm-unconfirmed-group" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span className="f-hint">「{g.name || '（没有群名）'}」是机器人自动接的，还没人确认是她的群：确认以前这个群的草稿都等你看过再发。</span>
+          <button type="button" className="btn sm" disabled={busy}
+            onClick={() => run({ action: 'group_confirm', chat: g.chat }, `记下了：「${g.name || '这个群'}」是她的群`)}>是她的群</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ReachLine({ reach }) {
+  return <div className="f-hint prm-reach">{reachText(reach)}</div>
+}
+
+// 做手卡 (PRM_HANDCARDS): the products of her latest 抖店 sample order the bot made are ticked; other 抖店 product ids may be
+// typed; none at all: the Mac takes the ones she picked from her case file (or makes none and says why).
+function HandcardsBlock({ p, busy, run }) {
+  const deal = p.deal
+  const order = deal.card_items
+  const fromOrder = order?.shop === 'dy' ? order.items : []
+  const [ticked, setTicked] = useState(() => fromOrder.map((i) => i.item_id))
+  const [extra, setExtra] = useState('')
+  const items = [...new Set([...ticked, ...extra.split(/[\s,，、;；]+/).filter(Boolean)])]
+  const off = !p.active || deal.mode !== 'copilot'
+  const tick = (id, on) => setTicked((t) => (on ? [...t, id] : t.filter((x) => x !== id)))
+  return (
+    <div className="stack prm-handcards" style={{ gap: 6 }}>
+      <b>直播手卡</b>
+      <div className="f-hint">
+        她要上播、要手卡：点「做手卡」，Mac 照老板模板把勾上的款做成图片版手卡（一款一张，价格、尺码、颜色按商品目录，库存写「充足」），
+        附在草稿里，在「待审批」里等你看过再发（不会自动发）。什么都不勾、不填，Mac 按案卷里她选的款做。
+      </div>
+      {order && order.shop !== 'dy' && <div className="dim">她最近的寄样单是小红书店的：手卡只做抖店的款，在下面填抖店的商品 ID。</div>}
+      {fromOrder.length > 0 && (
+        <div className="stack" style={{ gap: 4 }}>
+          <span className="dim">她最近的寄样单{order.order ? ` ${order.order}` : ''}（{fmtClock(order.at)}）里的款：</span>
+          {fromOrder.map((i) => (
+            <label key={i.item_id} className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={ticked.includes(i.item_id)} aria-label={`做手卡：商品 ${i.item_id}`}
+                onChange={(e) => tick(i.item_id, e.target.checked)} />
+              <span className="mono">{i.item_id}</span>{i.skus > 0 && <span className="dim">（寄了 {i.skus} 个 SKU）</span>}
+            </label>
+          ))}
+        </div>
+      )}
+      <Field label="其他商品 ID（抖店，空格隔开）">
+        <TextInput mono value={extra} onChange={setExtra} placeholder="3000000000000000001" aria-label={`${p.name} 做手卡的其他商品 ID`} />
+      </Field>
+      <div>
+        <button type="button" className="btn" disabled={busy || off}
+          onClick={() => run({ action: 'handcards', items }, items.length
+            ? `已请 Mac 做 ${items.length} 款手卡，做好会出现在「待审批」里`
+            : '已请 Mac 按案卷里她选的款做手卡，做好会出现在「待审批」里')}>
+          <IdentificationCard />做手卡
+        </button>
+        {off && <span className="dim" style={{ marginLeft: 8 }}>{!p.active ? '已停用的达人不做' : '先恢复副驾驶'}</span>}
+      </div>
+    </div>
+  )
+}
+
 /** 三方群 (src/prm/three_party.py, 2026-10-30): 「拉三方群」 makes the group in this PC's WeChat (her and PRM_GROUP_WITH,
  *  picked in 「发起群聊」 and read back before 「完成」; nothing is said in it and it is not renamed: the suggested name is
  *  there to copy); 「先试一下」 picks them and cancels.  A run that may or may not have made it asks 「建好了 / 没建成」.
  *  A group the boss made with her and us (``by`` "boss", 老板拉的群, PRM_BOSS_GROUPS) is hers already: it says so and what
- *  the bot does there (her lines drafted, sent in the group), without the name to copy (the boss named it). */
+ *  the bot does there (her lines drafted, sent in the group), without the name to copy (the boss named it); one the admin
+ *  linked by hand (``by`` "manual", 接手任何合作群) says 手动接的群 the same way.  Both have 「不接了」 (deal action
+ *  ``group_unlink`` without a chat, 2026-11-09): no more drafting there, it stays her 三方群, read only (「群已经不在了」 is for
+ *  a group that is gone). */
 function ThreePartyBlock({ p, d, busy, run }) {
   const toast = useToast()
   const [asking, setAsking] = useState(false)
@@ -505,6 +624,16 @@ function ThreePartyBlock({ p, d, busy, run }) {
     <button type="button" className="btn sm ghost" disabled={busy}
       onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
   )
+  // 「不接了」 (2026-11-09): the toast says what the bot answered (``reading``: this PC reads the group now); a 老板拉的群
+  // with PRM_BOSS_GROUPS off is not drafted in anyway (the bot would refuse): no button then
+  const unlinked = (out) => (out.reading
+    ? '记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读'
+    : '记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，这台电脑读不了群，群里的话交不到她私聊的草稿')
+  const unlink = (
+    <button type="button" className="btn sm ghost" disabled={busy}
+      onClick={() => run({ action: 'group_unlink' }, unlinked)}>不接了</button>
+  )
+  const bossOn = !!d?.boss_groups?.enabled
   return (
     <div className="stack prm-group" style={{ gap: 6 }}>
       <b>三方群</b>
@@ -512,12 +641,23 @@ function ThreePartyBlock({ p, d, busy, run }) {
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 老板拉的群（{fmtClock(g.at)} 发现）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。</span>
+            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；{othersLine(d?.boss_groups, { boss: true })}群里的话也会交给她私聊的草稿。{bossOn ? '「不接了」：不再起草，它还是她的三方群，机器人只读。' : ''}</span>
+            {bossOn && unlink}
             {gone}
           </div>
         </>
       )}
-      {g.state === 'created' && g.by !== 'boss' && (
+      {g.state === 'created' && g.by === 'manual' && (
+        <>
+          <div><UsersThree style={{ verticalAlign: -2 }} /> {g.why === '自动接的群' ? '自动接的群' : '手动接的群'}（{fmtClock(g.at)} 接手）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="f-hint">{g.why === '自动接的群' ? '群里只有她一位登记过的达人，机器人自己接手了这个群' : '运营在微信里接手了这个群（「接群」）'}：她在群里说的话照常起草，回复发在群里，群里的人都看得到；{othersLine(d?.boss_groups, { boss: true })}群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
+            {unlink}
+            {gone}
+          </div>
+        </>
+      )}
+      {g.state === 'created' && g.by !== 'boss' && g.by !== 'manual' && (
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 三方群已建好（{fmtClock(g.at)}{g.made ? '' : '，手动标的'}）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>

@@ -332,7 +332,7 @@ class TestPrmPages:
     """待审批 and 合作单 against a running PRM service (in memory: nothing is written to data/)."""
 
     @pytest.fixture
-    def prm(self):
+    def prm(self, tmp_path):
         import json as _json
         import time as _time
         from types import SimpleNamespace
@@ -355,7 +355,8 @@ class TestPrmPages:
             claude_relay_max_chars=1500, admin_wxid="wxid_admin", prm_copilot="on", prm_db=":memory:",
         )
         sent = []
-        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock)
+        # (its files in the test's own folder: GET /api/prm/file serves only what is inside it, review 2026-11-10)
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
         service = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock,
                              send=lambda c, t: sent.append((c, t)) or True, send_file=lambda c, p: True)
         service.register("wxid_creator01", "小美", "618 防晒")
@@ -418,7 +419,210 @@ class TestPrmPages:
         page.wait_for_timeout(300)
         assert "整段一条发（空一行就是分开发，最多 3 条）" in card.inner_text()
 
-    def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
+    def test_review_page_shows_a_sample_orders_photo_sheet_to_the_operators_only(self, page, prm, tmp_path):
+        """PRM_DRAFT_CONTEXT (2026-11-09): a sample order's draft with the Mac's photo sheet (``meta.operator_files``)
+        shows it as a picture in its platform block (GET /api/prm/file?…&kind=operator), says it is only for the
+        operators, says a sheet whose file is gone was cleaned up; a hat with no picture behind it leaves 「批准并执行」
+        off."""
+        import struct
+        import zlib
+        from src.prm import platforms
+
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+        sheet = tmp_path / "relay" / "outfiles" / "job-77" / "对图单-77.png"
+        sheet.parent.mkdir(parents=True)
+        sheet.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+                          + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + chunk(b"IEND", b""))
+        action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
+            {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000202", "qty": 1}]}],
+            "creator_platform": "dy", "creator_account": "test_daren_01"})
+        preview = {"version": 1, "action": action, "verdict": "blocked",
+                   "problems": ["A7269901002A-F（均码粉色）这顶没有照片对过，先核对再建"],
+                   "facts": [{"label": "对图", "value": "A7269901001A-F 驼色：对的是这次发的 图片-1.jpg（图库里第 1 款、第 1 个"
+                                                        "颜色）；√ 图对得上（款第 1，颜色第 1）"}],
+                   "steps": [], "run": {}, "previewed_at": prm.clock.now}
+        files = [{"name": "对图单-77.png", "path": str(sheet), "why": "寄样单里每一顶和她发的图并排对比；只给运营看，不发给达人"},
+                 {"name": "对图单-70.jpg", "path": str(sheet.parent / "gone.jpg"), "why": "上一份"}]
+        pid = prm.service.store.add_packet(
+            deal_id=1, party_id=1, job_id=None, chat_id="wxid_creator01", kind="money", text="寄样单建好啦",
+            attachments=[], intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
+            tool="jst.sample_order", platform={"action": action, "preview": preview}, meta={"operator_files": files},
+            now=prm.clock.now)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        box = card.locator(".prm-platform")
+        text = box.inner_text()
+        for expected in ("这顶没有照片对过，先核对再建", "√ 图对得上", "只给运营看（不发给达人）：寄样单里每一顶和她发的图并排对比",
+                         "对图单-70.jpg（图已经清理掉了）"):
+            assert expected in text, expected
+        img = box.locator("img")
+        assert img.count() == 1 and img.get_attribute("src") == f"/api/prm/file?packet={pid}&kind=operator&n=0"
+        page.wait_for_function("() => document.querySelector('.prm-operator-file img').naturalWidth > 0")
+        assert img.evaluate("el => el.naturalWidth") == 1                 # the page got the picture and decoded it
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+        assert "对图单" not in card.locator(".row .tag").all_inner_texts().__str__()   # no attachment tag for it
+
+    def test_review_page_confirms_a_held_hat_and_takes_it_back(self, page, prm):
+        """PRM_DRAFT_CONTEXT 「对过图了」 (2026-11-09): a sample order the Mac held for two hats' photos shows
+        「对过图了，用 <编码>」 for each under its platform block; a click keeps the confirmation for her deal and the card
+        says 「已确认 <编码>，还有 1 顶扣着：都确认完自动重新预览」 with 「撤销」, which takes it back.  The last held hat
+        confirmed (2026-11-10): the bot asks the Mac for the new preview itself, the card shows it under way (「正在重新
+        预览」, the buttons off) instead of 「点「重新预览」按确认再核」.  A draft whose preview went by the confirmation
+        says so, and once it is taken back 批准并执行 goes off and the card says to preview it again (nothing previews it
+        by itself then)."""
+        from src.prm import platforms
+
+        code, other = "A7269901001B-F", "A7269901002A-F"
+        prm.service._draft_context = True                                   # (PRM_DRAFT_CONTEXT=on)
+        store = prm.service.store
+        action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
+            {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000203", "qty": 1}]}],
+            "creator_platform": "dy", "creator_account": "test_daren_01"})
+        held = {"version": 1, "action": action, "verdict": "blocked", "steps": [], "run": {}, "facts": [],
+                "problems": [f"{c}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；"
+                             "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」" for c in (code, other)],
+                "previewed_at": prm.clock.now}
+        pid = store.add_packet(
+            deal_id=1, party_id=1, job_id=None, chat_id="wxid_creator01", kind="money", text="寄样单建好啦",
+            attachments=[], intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
+            tool="jst.sample_order", platform={"action": action, "preview": held},
+            meta={"draft_context": {"v": 3, "gated": True}, "photo_held": [code, other]}, now=prm.clock.now)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        box = card.locator(".prm-photo-held")
+        assert "Mac 对图扣着的帽子" in box.inner_text()
+        box.locator(f"button:has-text('对过图了，用 {code}')").click()
+        page.wait_for_timeout(1000)
+        assert [r["code"] for r in store.photo_confirmations(1)] == [code]
+        assert f"已确认 {code}，还有 1 顶扣着：都确认完自动重新预览" in box.inner_text()
+        assert not store.packet(pid)["platform"].get("previewing")           # (a hat still held: nothing previewed)
+        box.locator("button:has-text('撤销')").click()
+        page.wait_for_timeout(1000)
+        assert store.photo_confirmations(1) == []
+        assert box.locator(f"button:has-text('对过图了，用 {code}')").count() == 1
+        # both confirmed: the bot previews the order again by itself, and the card shows it
+        for c in (code, other):
+            box.locator(f"button:has-text('对过图了，用 {c}')").click()
+            page.wait_for_timeout(1000)
+        assert sorted(r["code"] for r in store.photo_confirmations(1)) == sorted([code, other])
+        assert store.packet(pid)["platform"]["previewing"]
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["op"] == "platform_preview" and job["meta"]["packet_id"] == pid
+        text = card.inner_text()
+        assert f"已确认 {code}，正在重新预览（按确认再核）" in text and f"已确认 {other}，正在重新预览（按确认再核）" in text
+        assert "正在重新预览…" in text and "点「重新预览」按确认再核" not in text
+        assert card.locator("button:has-text('重新预览')").is_disabled()
+        assert card.locator(".prm-photo-held button:has-text('撤销')").first.is_disabled()
+        # no worker on the Mac heard from for a while (review 2026-11-10): the card says the new preview waits for it
+        prm.clock.now += 300
+        page.reload()
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        text = card.locator(".prm-photo-held").inner_text()
+        assert f"已确认 {code}；Mac 现在不在线，重新预览要等它上线" in text and "正在重新预览（按确认再核）" not in text
+        prm.relay.note_worker(None, kinds=("prm",))                         # (it is back)
+        page.reload()
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        assert f"已确认 {code}，正在重新预览（按确认再核）" in card.locator(".prm-photo-held").inner_text()
+        # its preview went by the confirmation (ready): taken back, 批准并执行 goes off
+        assert store.unconfirm_photo(1, other)
+        ready = {**held, "verdict": "ready", "problems": [], "run": {"steps": ["create"]}}
+        assert store.set_platform(pid, {"action": action, "preview": ready}, ("pending",))
+        assert store.merge_packet_meta(pid, {"photo_held": [], "photo_confirmed": [code]})
+        page.reload()
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        assert f"已确认 {code}：这份预览按确认核过" in card.locator(".prm-photo-held").inner_text()
+        assert not card.locator("button:has-text('批准并执行')").is_disabled()
+        card.locator(".prm-photo-held button:has-text('撤销')").click()
+        page.wait_for_timeout(1000)
+        text = card.inner_text()
+        assert f"撤销了 {code} 的「对过图了」：点「重新预览」再核" in text
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+        assert not store.packet(pid)["platform"].get("previewing")           # (an undo previews nothing by itself)
+        assert not card.locator("button:has-text('重新预览')").is_disabled()   # (the button, as ever)
+
+    def test_review_page_shows_everything_the_merged_branches_put_on_one_draft(self, page, prm, tmp_path):
+        """合并 draft-context (2026-11-10): one waiting draft with every part the merged branches give a card: a group
+        linked by hand whose redrafts reached the cap (「重新起草」), told to the admin's WeChat (已发到微信), with 直播手卡
+        (「手卡」, each card a picture) and a sample order the Mac held a hat of for its photo (the sheet in the platform
+        block, 「对过图了，用 <编码>」): every part shows on the card, the button keeps the confirmation, 批准并执行 stays off."""
+        import re
+        import struct
+        import zlib
+        from src.prm import platforms
+
+        def png(path):
+            def chunk(kind, data):
+                return (struct.pack(">I", len(data)) + kind + data
+                        + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+                             + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + chunk(b"IEND", b""))
+            return path
+
+        code = "A7269901001B-F"
+        prm.service._draft_context = True                                   # (PRM_DRAFT_CONTEXT=on)
+        store = prm.service.store
+        sheet = png(tmp_path / "relay" / "outfiles" / "job-78" / "对图单-78-扣着的.png")
+        cards = [png(tmp_path / "relay" / "outfiles" / "job-78" / name) for name in ("手卡_01_测试帽.png", "手卡_02_测试帽二.png")]
+        action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
+            {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000203", "qty": 1}]}],
+            "creator_platform": "dy", "creator_account": "test_daren_01"})
+        held = {"version": 1, "action": action, "verdict": "blocked", "steps": [], "run": {}, "facts": [],
+                "problems": [f"{code}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；"
+                             "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"], "previewed_at": prm.clock.now}
+        pid = store.add_packet(
+            deal_id=1, party_id=1, job_id=None, chat_id="test_group_33@chatroom", kind="money",
+            text="寄样单和手卡都在这儿啦", intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
+            attachments=[{"name": c.name, "path": str(c), "size": c.stat().st_size, "sha256": ""} for c in cards],
+            tool="jst.sample_order", platform={"action": action, "preview": held},
+            meta={"channel": "group", "group_name": "小美合作对接群", "group_manual": True, "unheard": 2,
+                  "handcards": {"ok": True, "count": 2, "note": "做了 2 张手卡", "problems": [], "cuts": [],
+                                "promo_until": "", "catalog_at": None, "console": False},
+                  "draft_context": {"v": 3, "gated": True}, "photo_held": [code],
+                  "operator_files": [{"name": sheet.name, "path": str(sheet), "why": "扣着的那几顶：只给运营看"}]},
+            now=prm.clock.now)
+
+        def told(state):
+            for p in state["pending"]:
+                if p["id"] == pid:
+                    p["wechat_at"] = prm.clock.now
+
+        self._serve_prm(page, told)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="寄样单和手卡都在这儿啦")
+        card.wait_for()
+        assert card.locator(".prm-wechat-tag").inner_text() == "已发到微信"
+        assert card.locator(".prm-group-tag").inner_text().strip() == "群里 · 小美合作对接群"
+        assert card.locator(".tag", has_text=re.compile(r"^手卡$")).count() == 1
+        assert "群里别人又说了 2 句，这份草稿没听到" in card.locator(".prm-unheard").inner_text()
+        assert card.locator(".prm-unheard button:has-text('重新起草')").count() == 1
+        box = card.locator(".prm-platform")
+        assert box.locator("img").get_attribute("src") == f"/api/prm/file?packet={pid}&kind=operator&n=0"
+        assert "只给运营看（不发给达人）：扣着的那几顶" in box.inner_text()
+        pictures = card.locator(".prm-handcards img")
+        assert pictures.count() == 2
+        assert pictures.nth(1).get_attribute("src") == f"/api/prm/file?packet={pid}&kind=attachment&n=1"
+        page.wait_for_function("() => [...document.querySelectorAll('.prm-draft img')].length >= 3 && "
+                               "[...document.querySelectorAll('.prm-draft img')].every((i) => i.complete && i.naturalWidth > 0)")
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+        card.locator(f".prm-photo-held button:has-text('对过图了，用 {code}')").click()
+        page.wait_for_timeout(1000)
+        assert [r["code"] for r in store.photo_confirmations(1)] == [code]
+        # (its one held hat: the bot previews it again by itself, 2026-11-10)
+        assert f"已确认 {code}，正在重新预览（按确认再核）" in card.locator(".prm-photo-held").inner_text()
+        assert store.packet(pid)["platform"]["previewing"]
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+
+    @staticmethod
+    def _platform_draft(prm) -> dict:
+        """She agrees to 20%; the Mac drafts 「专属佣金 20% 设好啦～」 with a 专属佣金 action, previewed: the draft waits."""
         import json as _json
         from src.prm import platforms
         from src.prm.service import SETTLE_SEC
@@ -442,7 +646,12 @@ class TestPrmPages:
              "reason": "kb/合作政策.md", "platform": preview}
         prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
         prm.relay.tick()
-        packet = prm.service.store.packet_for_job(job["id"])
+        return prm.service.store.packet_for_job(job["id"])
+
+    def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
+        import json as _json
+
+        packet = self._platform_draft(prm)
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.wait_for_timeout(1500)
         card = page.locator(".prm-draft", has_text="平台动作")
@@ -475,6 +684,82 @@ class TestPrmPages:
         page.wait_for_timeout(1500)
         assert page.locator(".prm-alerts").count() == 0
         assert prm.sent == []
+
+    def test_review_page_shows_a_channel_links_agreement_sku_by_sku(self, page, prm, tmp_path, monkeypatch):
+        """专属链接 the shop's way (2026-11-09): the card shows what the Mac worked out: the prefix with its count, each
+        SKU's daily price → channel price, its stock and what the main product can spare, a colour without stock, the
+        CLI's own warnings, and in the detail both commands (the read and the preview with the agreement)."""
+        import json as _json
+        from platform_fakes import (DY_ITEM2, DY_SKU2, DY_SKU2B, FakeNode, catalog, dy_agreed_preview, dy_bound_list,
+                                    dy_read_preview, rule)
+        from src.prm import platforms
+        from src.prm.service import SETTLE_SEC
+
+        node = FakeNode(tmp_path / "mac", monkeypatch)
+        node.rules([
+            rule(["channel-goods-list"], dy_bound_list(item=DY_ITEM2)),
+            rule(["channel-goods-create"], dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500),
+                                                            (DY_SKU2B, "均码咖啡", "290.00", 0)], item=DY_ITEM2),
+                 execute=False, agreement=False),
+            rule(["channel-goods-create"], dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500),
+                                                              (DY_SKU2B, "均码咖啡", "290.00", "261.00", 0, 0)],
+                                                             item=DY_ITEM2), execute=False, agreement=True)])
+        preview = platforms.preview({"action": "dy.channel_goods", "item_id": DY_ITEM2,
+                                     "creator_platform_id": "5100000000000002", "title_prefix": "小美专属"},
+                                    platforms.config(node.settings()), catalog=catalog())
+        assert preview["verdict"] == "ready", preview
+        prm.service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": "要链接，前缀：小美专属",
+                            "msg_type": 1, "is_group": False, "timestamp": prm.clock.now})
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        d = {"intent": "要专属链接", "slots": {}, "stage_proposal": "", "message_kind": "money",
+             "reply_draft": "您的专属链接：{链接}", "attachments_to_send": [], "needs_attention": False,
+             "reason": "kb/合作政策.md", "platform": preview}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
+        prm.relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="平台动作")
+        text = card.inner_text()
+        for expected in ("平台动作：抖店 · 达人专属链接（渠道品）并绑定达人", "预览通过，可以批准执行",
+                         "标题前缀：【小美专属】（10/12 个字符，汉字算 2 个）", "渠道类型：专属达人带货：只绑这一位达人，库存不共享",
+                         f"SKU {DY_SKU2} 均码黑色：日常价 315.00 元 → 渠道价 283.00 元；库存 100 件（主商品可分 500 件）",
+                         f"SKU {DY_SKU2B} 均码咖啡：日常价 290.00 元 → 渠道价 261.00 元；库存 0 件（主商品可分 0 件）",
+                         "提醒：", "主商品这个颜色没有可分的库存", "有效期：长期有效", "仅支持预览查看",
+                         "每个颜色的库存（件）", "每个 SKU 日常价的 9 折，取整到元"):
+            assert expected in text, expected
+        card.locator("button:has-text('看预览明细')").click()
+        detail = card.inner_text()
+        assert "抖店 · 查她是不是已经绑在这个商品的渠道品上" in detail and "她还没绑在这个商品的渠道品上" in detail
+        assert "抖店 · 读主商品的 SKU、日常价和可分库存" in detail and "--sale-channel=kol" in detail
+        assert "抖店 · 按约定建渠道品" in detail and "--agreement=" in detail
+
+    def test_review_page_keeps_an_edited_reply_whose_execution_could_not_be_queued(self, page, prm):
+        """改了再执行 whose job the relay certainly did not queue (the draft waits again: 微信里审批草稿, third verification):
+        the edited words are kept for the next try in the edit box; the card still shows, and 批准并执行 still runs, the
+        draft as drafted."""
+        from unittest.mock import patch
+
+        edited = "专属佣金 20% 已经设好，明天 0 点生效～"
+        packet = self._platform_draft(prm)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="平台动作")
+        card.wait_for()
+        assert card.locator(".prm-kept-edit").count() == 0
+        card.locator("button:has-text('改了再执行')").click()
+        card.locator("textarea[aria-label='修改要发的内容']").fill(edited)
+        with patch.object(prm.relay, "submit", side_effect=RuntimeError("队列坏了")):
+            card.locator("button:has-text('确认并执行')").click()
+            page.locator("[role=dialog] button:has-text('执行')").click()
+            page.get_by_text("没能排进 Mac 的任务队列").first.wait_for()
+        assert prm.service.store.packet(packet["id"])["final_text"] == edited
+        page.reload()
+        card = page.locator(".prm-draft", has_text="平台动作")
+        card.locator(".prm-kept-edit").wait_for()
+        assert "专属佣金 20% 设好啦～" in card.locator(".prm-text").inner_text()
+        card.locator("button:has-text('改了再执行')").click()
+        assert card.locator("textarea[aria-label='修改要发的内容']").input_value() == edited
+        assert card.locator(".prm-kept-edit").count() == 0
 
     def test_review_page_drops_a_draft_after_asking(self, page, prm):
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
@@ -807,9 +1092,142 @@ class TestPrmPages:
         block = page.locator(".prm-huopan")
         assert block.locator("button:has-text('补发货盘')").is_disabled() and "先恢复副驾驶" in block.inner_text()
 
+    def test_deals_page_asks_for_handcards_and_the_review_page_shows_the_cards(self, page, prm, tmp_path):
+        """直播手卡 (PRM_HANDCARDS, 2026-11-09): an opened deal has 「直播手卡」 with her latest sample order's product ticked;
+        小美's draft waits, so a click says why not; once it is dropped a click with one more typed product id asks the
+        Mac for both; the draft that comes back is tagged 「手卡」 in 待审批 and shows each card as a picture (GET
+        /api/prm/file, kind attachment) with the Mac's note; cards that were not made: tagged so, 「发送」 off, why; cards
+        whose 双11 line is past its end date: shown, 「发送」 off, 「改了再发」 sends only the edited words after a confirm
+        (review 2026-11-09, round 2).  Switched off: no block."""
+        import io
+        import json as _json
+        import re
+        from PIL import Image
+        from platform_fakes import DY_ITEM, DY_SKU
+        from test_prm_sample_sync import verified_order
+        from src.prm import handcards as hc
+        from src.prm.service import SETTLE_SEC
+
+        prm.relay._files_dir = tmp_path / "relay"                          # (this test's own folder for the cards)
+        prm.service._handcards = True                                      # (PRM_HANDCARDS=on)
+        verified_order(prm.service)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-handcards")
+        text = block.inner_text()
+        assert "直播手卡" in text and "不会自动发" in text and "寄了 1 个 SKU" in text and DY_ITEM in text
+        assert block.locator(f"input[aria-label='做手卡：商品 {DY_ITEM}']").is_checked()
+        block.locator("button:has-text('做手卡')").click()
+        page.wait_for_timeout(1200)
+        assert "「待审批」里已经有她的草稿：先处理那一份" in page.inner_text("body")
+        [waiting] = prm.service.store.packets(("pending",))
+        assert prm.service.decide(waiting["id"], "drop")["ok"]
+        block.locator("input[aria-label='小美 做手卡的其他商品 ID']").fill("3000000000000000901")
+        block.locator("button:has-text('做手卡')").click()
+        page.wait_for_timeout(1200)
+        assert "已请 Mac 做 2 款手卡" in page.inner_text("body")
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["handcards"]["items"] == [{"item_id": DY_ITEM, "sku_ids": [DY_SKU]},
+                                                     {"item_id": "3000000000000000901", "sku_ids": []}]
+        names = ["手卡_01_测试帽.png", "手卡_02_测试帽二.png"]
+        for name, colour in zip(names, ((200, 40, 40), (40, 60, 200))):
+            buf = io.BytesIO()
+            Image.new("RGB", (160, 120), colour).save(buf, "PNG")
+            body = buf.getvalue()
+            assert prm.relay.outfile(job["id"], name, io.BytesIO(body).read, len(body))
+        made = hc.made_block(True, cards=names, note="做了 2 张手卡（小美专属，抖音）\n待定（卡上红字）：没有")
+        draft = {"intent": "做手卡", "slots": {}, "stage_proposal": "", "message_kind": "material",
+                 "reply_draft": "老师，手卡整理好啦～", "attachments_to_send": names, "attachments_named": names,
+                 "needs_attention": False, "reason": "kb 手卡那一节", "handcards_made": made}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="老师，手卡整理好啦～")
+        assert card.locator(".tag", has_text=re.compile(r"^手卡$")).count() == 1
+        pictures = card.locator(".prm-handcards img")
+        assert pictures.count() == 2
+        packet = prm.service.store.packet_for_job(job["id"])
+        assert pictures.nth(1).get_attribute("src") == f"/api/prm/file?packet={packet['id']}&kind=attachment&n=1"
+        page.wait_for_timeout(500)
+        assert pictures.nth(0).evaluate("img => img.complete && img.naturalWidth") == 160
+        note = card.locator(".prm-handcards").inner_text()
+        assert "手卡 2 张：看过卡片再发" in note and "待定（卡上红字）：没有" in note
+        assert prm.service.store.move(packet["id"], ("pending",), "approved", decided_at=prm.clock.now)
+        page.reload(timeout=10000)                                         # (approved, not sent yet: going out)
+        page.wait_for_timeout(1500)
+        assert card.locator(".prm-handcards-line").inner_text() == "手卡 2 张随这条一起发出"
+        assert prm.service.store.move(packet["id"], ("approved",), "pending", decided_at=None)
+        page.reload(timeout=10000)
+        page.wait_for_timeout(1500)
+        assert "这一条：做手卡" in card.inner_text()
+        assert card.locator("button:has-text('发送')").first.is_enabled()
+        assert prm.service.decide(packet["id"], "drop")["ok"]
+        assert prm.service.deal_action("handcards", {"deal_id": 1, "items": []})["ok"]
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        failed = hc.made_block(False, problems=["出图出错了（退出码 1）"])
+        draft = {**draft, "reply_draft": "老师，手卡在这儿～", "attachments_to_send": [], "attachments_named": [],
+                 "handcards_made": failed}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        page.reload(timeout=10000)                                         # (already on 待审批: read it again)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="老师，手卡在这儿～")
+        assert card.locator(".tag", has_text=re.compile(r"^手卡没做成$")).count() == 1 and card.locator("img").count() == 0
+        assert "手卡没做成：出图出错了（退出码 1）" in card.inner_text()
+        assert card.locator("button:has-text('发送')").first.is_disabled()
+        assert "改了再发，或者不发" in card.inner_text()
+        assert prm.service.decide(prm.service.store.packet_for_job(job["id"])["id"], "drop")["ok"]
+        assert prm.service.deal_action("handcards", {"deal_id": 1, "items": []})["ok"]
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        for name in names:
+            buf = io.BytesIO()
+            Image.new("RGB", (160, 120), (90, 90, 90)).save(buf, "PNG")
+            assert prm.relay.outfile(job["id"], name, io.BytesIO(buf.getvalue()).read, len(buf.getvalue()))
+        old = hc.made_block(True, cards=names, note="做了 2 张手卡", promo_until="2026-01-01")
+        draft = {**draft, "reply_draft": "老师，手卡又整理好啦～", "attachments_to_send": names, "attachments_named": names,
+                 "handcards_made": old}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        page.reload(timeout=10000)
+        page.wait_for_timeout(1500)
+        expired = prm.service.store.packet_for_job(job["id"])["id"]
+        card = page.locator(".prm-draft", has_text=re.compile(rf"DRAFT #{expired}(?!\d)"))   # (its words change below)
+        assert "老师，手卡又整理好啦～" in card.inner_text() and card.locator(".prm-handcards img").count() == 2
+        assert "手卡上的双11价已过期，请重新做手卡（卡上的双11 那一行到 2026-01-01 为止）" in card.inner_text()
+        assert card.locator("button:has-text('发送')").first.is_disabled()
+        card.locator("button:has-text('改了再发')").click()               # (round 2: only the edited words go)
+        card.locator("textarea[aria-label='修改要发的内容']").fill("老师，双11 的价过了，手卡我重新做好再发您～")
+        card.locator("button:has-text('确认发送')").click()
+        dialog = page.locator("[role=dialog]")
+        assert "过期的手卡不会发出，只发这段话" in dialog.inner_text()
+        dialog.locator("button:has-text('再想想')").click()
+        assert prm.service.store.packet_for_job(job["id"])["status"] == "pending"
+        card.locator("button:has-text('确认发送')").click()
+        page.locator("[role=dialog] button:has-text('只发这段话')").click()
+        page.wait_for_timeout(800)
+        packet = prm.service.store.packet_for_job(job["id"])
+        assert packet["status"] == "approved" and packet["attachments"] == []
+        assert packet["final_text"] == "老师，双11 的价过了，手卡我重新做好再发您～"
+        page.reload(timeout=10000)                                         # (round 3: its line says what is true)
+        page.wait_for_timeout(1500)
+        line = card.locator(".prm-handcards-line").inner_text()
+        assert line == "过期的手卡没有附上：这条只发改过的话" and card.locator("img").count() == 0
+        prm.service._handcards = False
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        assert page.locator(".prm-handcards").count() == 0
+
     def test_deals_page_edits_saves_and_shows_the_draft_note(self, page, prm):
         """起草备注 (2026-10-31): an opened deal shows its note (none yet) with the hint; 「写备注」 opens the field, 「保存」
-        keeps it through the deal action (one line, as the bot keeps it) and her next draft job carries it; more than
+        keeps it through the deal action (its lines, as the bot keeps them) and her next draft job carries it; more than
         300 characters, or the bot refusing, says why right there and keeps nothing; saved empty, it is cleared."""
         from src.prm.service import SETTLE_SEC
 
@@ -822,6 +1240,16 @@ class TestPrmPages:
         text = block.inner_text()
         assert "起草备注" in text and "（没有）" in text
         assert "写给 Mac 起草时看的，比如她签名里的要求：直接发链接和 brief、不接语音" in text
+        hint = "寄样单里没对过图的那顶不在备注里确认：对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"
+        assert hint not in text and block.locator(".prm-confirm-hint").count() == 0   # (PRM_DRAFT_CONTEXT off: review C-8)
+        prm.service._draft_context = True
+        page.reload(timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-draft-note")
+        assert hint in block.inner_text()                                    # (on: the hint)
+        prm.service._draft_context = False
         block.locator("button:has-text('写备注')").click()
         field = block.locator("textarea[aria-label='小美 的起草备注']")
         field.fill("长" * 301)
@@ -832,7 +1260,7 @@ class TestPrmPages:
         field.fill("直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音")
         block.locator("button:has-text('保存')").click()
         page.wait_for_timeout(1500)
-        kept = "直接发链接和brief，感兴趣的会回复！ 勿催视频，不接语音"
+        kept = "直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音"
         assert store.deal(1)["draft_note"] == kept
         assert kept in block.inner_text() and block.locator("textarea").count() == 0
         assert "改起草备注" in page.locator(".prm-deal").inner_text()            # the deal's record
@@ -1120,7 +1548,8 @@ class TestPrmPages:
         from src.web import server as web_server
 
         class Clock:
-            now = _time.time() - 3 * 3600                    # (today, so the page shows the time alone)
+            # today at 12:00 (the page shows the time alone for today; real time minus 3 hours was yesterday before 03:00)
+            now = _time.mktime(_time.localtime()[:3] + (12, 0, 0, 0, 0, -1))
 
             def __call__(self):
                 return self.now
@@ -1514,6 +1943,88 @@ class TestPrmPages:
         assert "群里 · 收件信息复述" in row.inner_text()
         assert "群里" not in page.locator(".prm-recent tr", has_text="#1").inner_text()   # another one: as before
 
+    def test_review_page_says_the_drafts_go_to_wechat_and_tags_the_ones_told(self, page, prm):
+        """微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py): off (the running service here), 待审批 has nothing of
+        it; on, a line at the top says the drafts also go to the admin's WeChat and how to answer there, and a draft
+        told is tagged 已发到微信; drafts that could not be told are counted; without ADMIN_WXID the line says why."""
+        from src.prm.wechat_review import NO_ADMIN_WHY
+
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="在的，有什么可以帮你？")
+        card.wait_for()
+        assert page.locator(".prm-wechat-review").count() == 0 and card.locator(".prm-wechat-tag").count() == 0
+        shown = {"status": {"on": True, "why": "", "open": 1, "unsent": 0, "unsure": 0, "older": 0}, "told": True}
+
+        def wechat(state):
+            state["wechat_review"] = shown["status"]
+            for p in state["pending"]:
+                p["wechat_at"] = p["created_at"] if shown["told"] else None
+
+        self._serve_prm(page, wechat)
+        page.reload()
+        line = page.locator(".prm-wechat-review")
+        line.wait_for()
+        assert line.inner_text().strip() == (
+            "草稿也发到管理员微信里了：引用通知回 1 发出、2 不发、改 + 你的话，带平台动作的回「执行」")
+        tag = card.locator(".prm-wechat-tag")
+        assert tag.inner_text() == "已发到微信" and "和这里点是同一个决定" in tag.get_attribute("title")
+        assert "回 1 / 2 / 改" in tag.get_attribute("title")
+        shown.update(status={"on": True, "why": "", "open": 0, "unsent": 2, "unsure": 1, "older": 3}, told=False)
+        page.reload()
+        page.get_by_text("有 2 份试了几次都没发到微信，请在这里处理").wait_for()
+        text = line.inner_text()
+        assert "有 1 份发到微信时机器人停了（或者出错），不确定管理员收到没有" in text
+        assert "打开开关以前就在等的 3 份没发到微信，请在这里处理" in text
+        assert card.locator(".prm-wechat-tag").count() == 0
+        shown.update(status={"on": True, "why": NO_ADMIN_WHY, "open": 0, "unsent": 0, "unsure": 0, "older": 0})
+        page.reload()
+        page.get_by_text("没填管理员 wxid（ADMIN_WXID）").wait_for()
+        assert "回 1 发出" not in line.inner_text()
+
+    def test_review_page_says_what_wechat_can_do_for_a_draft_told_there(self, page, prm):
+        """「已发到微信」's tooltip (2026-11-10): a platform draft 「执行」 runs from WeChat only when the bot says so
+        (``wechat_execute``); one it does not is told that it cannot run from WeChat, never 「引用通知回「执行」」; a draft
+        whose pictures did not reach the chat (``wechat_console``) is the console's, only 不发 there.  A sample order
+        whose held hats its notice numbered (``wechat_photo``, 2026-11-10): 「对过图 1」 quoting it confirms them; one
+        being previewed again: a fresh notice follows."""
+        packet = self._platform_draft(prm)
+        shown = {"execute": False, "console": False, "photo": False, "previewing": False}
+
+        def told(state):
+            for p in state["pending"]:
+                if p["id"] == packet["id"]:
+                    p.update(wechat_at=prm.clock.now, wechat_execute=shown["execute"], wechat_console=shown["console"])
+                    if shown["photo"]:
+                        p["wechat_photo"] = True
+                    p["platform"]["previewing"] = shown["previewing"]
+
+        self._serve_prm(page, told)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="专属佣金 20% 设好啦～")
+        card.wait_for()
+        title = card.locator(".prm-wechat-tag").get_attribute("title")
+        assert "这一份微信里不能执行" in title and "引用通知回「执行」" not in title
+        shown.update(execute=True)
+        page.reload()
+        card.wait_for()
+        assert "引用通知回「执行」/ 2 也行" in card.locator(".prm-wechat-tag").get_attribute("title")
+        shown.update(console=True)
+        page.reload()
+        card.wait_for()
+        title = card.locator(".prm-wechat-tag").get_attribute("title")
+        assert "要看的图没发过去" in title and "只能回 2 不发" in title and "引用通知回「执行」" not in title
+        shown.update(execute=False, console=False, photo=True)
+        page.reload()
+        card.wait_for()
+        title = card.locator(".prm-wechat-tag").get_attribute("title")
+        assert "引用那条通知回「对过图 1」这样也能确认" in title and "自己重新预览、再发一条通知" in title
+        assert "引用通知回「执行」" not in title
+        shown.update(previewing=True)
+        page.reload()
+        card.wait_for()
+        title = card.locator(".prm-wechat-tag").get_attribute("title")
+        assert "正在重新预览，新的预览出来以后会再发一条通知" in title and "对过图" not in title
+
     @pytest.mark.parametrize("channel", [None, "private"], ids=["no-channel", "private"])
     def test_review_page_shows_and_sends_a_private_draft_exactly_as_before(self, page, prm, channel):
         """A draft without ``channel`` (a bot from before) or for her private chat looks as it did and 发送 sends it at
@@ -1576,6 +2087,8 @@ class TestPrmPages:
         assert "三方群已建好" not in text and "品牌测试×小美" not in text
         assert block.locator("button:has-text('复制群名')").count() == 0 and block.locator("button:has-text('拉三方群')").count() == 0
         assert block.locator("button:has-text('群已经不在了')").count() == 1
+        # (PRM_BOSS_GROUPS off here: the bot would refuse 「不接了」, so there is none, 2026-11-09)
+        assert block.locator("button:has-text('不接了')").count() == 0 and "不接了" not in text
         page.locator("button[aria-label='展开 小红']").click()                    # a deal with no group: as before
         assert page.locator(".prm-group button:has-text('拉三方群')").count() == 1
 
@@ -1786,6 +2299,434 @@ class TestPrmPages:
             page.locator(".prm-parties tr", has_text="wxid_creator01").wait_for()   # (read)
             above_the_settings = "".join(page.locator(".page .card:not(.adv-group), .page .note").all_inner_texts())
             assert card.count() == 0 and "老板拉的群" not in above_the_settings
+
+    # ── 接手任何合作群 (2026-11-09, src/prm/group_link.py): the admin's open 「接群」 question (``boss_groups.manual``),
+    # a deal's group linked by hand (``three_party.by`` "manual", ``deal.linked_groups``), a draft for such a group
+    # (``group_manual``); served by interception like the boss's groups above. Names and ids are made up. ──────────
+    def test_deals_page_shows_the_admins_jie_qun_question_with_the_switch_off(self, page, prm):
+        """PRM_BOSS_GROUPS off (``enabled`` False) and the admin asked who in a group she is: the card is there all the
+        same, named 合作群, with the group, its size, until when, who may be her (已登记 / 停用过 tags) and 「是她」 for each
+        (posts {chat, wxid} at once, toast without a 开场白), and 「不接」 (posts {chat}, no question)."""
+        now = prm.clock.now
+        manual = {"chat": "test_group_31@chatroom", "name": "测试合作对接群", "size": 4, "asked_at": now,
+                  "until": now + 1800, "three_party": False,
+                  "members": [{"wxid": "wxid_test_31a", "name": "测试达人甲", "registered": True, "stopped": False},
+                              {"wxid": "wxid_test_31b", "name": "测试商务", "registered": False, "stopped": False},
+                              {"wxid": "wxid_test_31c", "name": "测试达人乙", "registered": False, "stopped": True}]}
+        bg = {"enabled": False, "why_not": "", "warning": "", "boss": ["老板测试"], "boss_call": "老板", "pending": [],
+              "waiting": 0, "linked": 0, "manual": [manual]}
+        posted = []
+
+        def answer(route):
+            body = route.request.post_data_json
+            posted.append((route.request.url.rsplit("/", 1)[1], body))
+            bg.pop("manual", None)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+        self._serve_prm(page, lambda state: state.update(boss_groups=json.loads(json.dumps(bg))))
+        page.route("**/api/prm/boss-groups/*", answer)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        card.wait_for()
+        assert card.locator(".card-head h2").inner_text() == "合作群"
+        text = card.inner_text()
+        for expected in ("测试合作对接群", "4 人", "你在微信里发的「接群」", "前有效", "测试达人甲", "已登记", "wxid_test_31b",
+                         "停用过", "也可以在微信里回「是 编号」"):
+            assert expected in text, expected
+        assert "老板拉的群" not in text and card.locator("button:has-text('是她')").count() == 3
+        card.locator(".prm-boss-member", has_text="测试商务").locator("button:has-text('是她')").click()
+        page.get_by_text("已接手「测试合作对接群」：测试商务 登记成达人，之后她在群里说的话会起草").wait_for()
+        assert posted == [("pick", {"chat": "test_group_31@chatroom", "wxid": "wxid_test_31b"})]
+        assert page.locator("[role=dialog]").count() == 0
+        card.wait_for(state="detached")                                           # (nothing left to show)
+        bg["manual"] = [manual]
+        page.reload()
+        card.locator("button:has-text('不接')").click()
+        page.get_by_text("好的，「测试合作对接群」不接了").wait_for()
+        assert posted[1:] == [("ignore", {"chat": "test_group_31@chatroom"})] and page.locator("[role=dialog]").count() == 0
+
+    def test_deals_page_shows_the_question_the_groups_scan_asks(self, page, prm):
+        """群自己接上 (PRM_GROUPS_AUTO_LINK, 2026-11-11): a group the bot's own scan found with two registered creators in it
+        is a question on the same card (``by`` "scan", no ``until``): it says the bot saw it (not 「你在微信里发的」), has no
+        「前有效」, the same 「是她」 for each member and 「不接」; a deal's group the scan linked says 机器人自动接的."""
+        now = prm.clock.now
+        asked = {"chat": "test_group_41@chatroom", "name": "测试双达人群", "size": 4, "asked_at": now, "until": None,
+                 "three_party": False, "by": "scan",
+                 "members": [{"wxid": "wxid_test_41a", "name": "测试达人甲", "registered": True, "stopped": False},
+                             {"wxid": "wxid_test_41b", "name": "测试达人乙", "registered": True, "stopped": False},
+                             {"wxid": "wxid_test_41c", "name": "测试商务", "registered": False, "stopped": False}]}
+        bg = {"enabled": False, "why_not": "", "warning": "", "boss": [], "boss_call": "老板", "pending": [],
+              "waiting": 0, "linked": 0, "manual": [asked]}
+        posted = []
+
+        def answer(route):
+            posted.append((route.request.url.rsplit("/", 1)[1], route.request.post_data_json))
+            bg.pop("manual", None)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+        def state_of(state):
+            state.update(boss_groups=json.loads(json.dumps(bg)))
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01":
+                    p["deal"]["linked_groups"] = [{"chat": "test_group_42@chatroom", "name": "测试自动接的群", "at": now,
+                                                   "auto": True}]
+
+        self._serve_prm(page, state_of)
+        page.route("**/api/prm/boss-groups/*", answer)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        card.wait_for()
+        assert card.locator(".card-head h2").inner_text() == "合作群"
+        text = card.inner_text()
+        for expected in ("测试双达人群", "4 人", "机器人看到的群：里面不止一位登记过的达人，没自动接", "测试达人甲", "已登记",
+                         "不是合作群就点「不接」，机器人以后不再自己接它"):
+            assert expected in text, expected
+        assert "你在微信里发" not in text and "前有效" not in text
+        assert card.locator("button:has-text('是她')").count() == 3
+        page.locator("button[aria-label='展开 小美']").click()
+        linked = page.locator(".prm-linked-group")
+        linked.wait_for()
+        assert "「测试自动接的群」" in linked.inner_text() and "机器人自动接的" in linked.inner_text()
+        card.locator(".prm-boss-member", has_text="测试达人乙").locator("button:has-text('是她')").click()
+        page.get_by_text("已接手「测试双达人群」：测试达人乙，之后她在群里说的话会起草").wait_for()
+        assert posted == [("pick", {"chat": "test_group_41@chatroom", "wxid": "wxid_test_41b"})]
+        bg["manual"] = [asked]
+        page.reload()
+        card.locator("button:has-text('不接')").click()
+        page.get_by_text("好的，「测试双达人群」不接了").wait_for()
+        assert posted[1:] == [("ignore", {"chat": "test_group_41@chatroom"})]
+
+    def test_a_held_draft_says_why_and_a_group_the_scan_linked_is_confirmed_on_the_deal(self, page, prm):
+        """Review 2026-11-11 #1, #2: a draft that always waits says why on its card by day too (``hold``); a group the
+        scan linked by itself that nobody confirmed is said on her deal with 「是她的群」 (deal action ``group_confirm``)."""
+        from src.prm.service import AUTO_UNCONFIRMED_HELD
+
+        def state_of(state):
+            for p in state["pending"]:
+                if p["id"] == 2:
+                    p.update(channel="group", group_name="测试自动接的群", group_manual=True, hold=AUTO_UNCONFIRMED_HELD)
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01" and p.get("deal"):
+                    p["deal"]["unconfirmed_groups"] = [{"chat": "test_group_71@chatroom", "name": "测试自动接的群"}]
+
+        posted = []
+
+        def answer(route):
+            if route.request.method == "POST":
+                posted.append(route.request.post_data_json)
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+            else:
+                route.fallback()
+
+        self._serve_prm(page, state_of)
+        page.route("**/api/prm/deals", answer)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        hold = page.locator(".prm-draft .prm-hold")
+        hold.wait_for()
+        assert hold.inner_text() == f"要你看过再发：{AUTO_UNCONFIRMED_HELD}"
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.locator("button[aria-label='展开 小美']").click()
+        row = page.locator(".prm-unconfirmed-group")
+        row.wait_for()
+        assert "「测试自动接的群」是机器人自动接的，还没人确认是她的群" in row.inner_text()
+        row.locator("button:has-text('是她的群')").click()
+        page.get_by_text("记下了：「测试自动接的群」是她的群").wait_for()
+        assert posted and posted[-1]["action"] == "group_confirm" and posted[-1]["chat"] == "test_group_71@chatroom"
+
+    def test_deals_page_says_whose_lines_are_drafted_with_her_side_off_and_on(self, page, prm):
+        """她那边的人 (PRM_GROUP_HER_SIDE, 2026-11-11): the hints of the groups card (the admin's 「接群」 question, the 老板拉的群
+        card) and of her deal's linked group say 「别人说的话不起草」 with the switch off, and with it on that her side's lines
+        are drafted too (a group over PRM_BOSS_GROUP_MAX: not; the toast after 「是她」 too); our people, the boss and other
+        creators never."""
+        now = prm.clock.now
+        asked = {"chat": "test_group_61@chatroom", "name": "测试对接群", "size": 4, "asked_at": now, "until": now + 1800,
+                 "three_party": False,
+                 "members": [{"wxid": "wxid_test_61a", "name": "测试达人甲", "registered": True, "stopped": False}]}
+        big = {**asked, "chat": "test_group_62@chatroom", "name": "测试大群", "size": 12}
+        bg = {"enabled": True, "why_not": "", "warning": "", "boss": ["老板测试"], "boss_call": "老板", "pending": [],
+              "waiting": 0, "linked": 0, "manual": [asked, big]}
+
+        def state_of(state):
+            state.update(boss_groups=json.loads(json.dumps(bg)))
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01" and p.get("deal"):
+                    p["deal"]["linked_groups"] = [{"chat": "test_group_63@chatroom", "name": "测试手动接的群", "at": now}]
+
+        posted = []
+
+        def answer(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+        self._serve_prm(page, state_of)
+        page.route("**/api/prm/boss-groups/*", answer)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        rows = card.locator(".prm-manual-group")
+        rows.first.wait_for()
+        assert all("；别人说的话不起草。" in rows.nth(n).inner_text() for n in range(2))
+        assert card.locator(".prm-others-line").inner_text() == "老板和别人说的话不起草。"
+        page.locator("button[aria-label='展开 小美']").click()
+        linked = page.locator(".prm-linked-group")
+        linked.wait_for()
+        assert "别人说的话不起草。" in linked.inner_text() and "她那边" not in linked.inner_text()
+        bg.update(her_side=True, max=6)
+        page.reload()
+        rows.first.wait_for()
+        side = "她那边别的人（助理、商务）说的话也起草；我们自己的人和别的登记过的达人说的话不起草。"
+        assert side in rows.nth(0).inner_text()
+        assert "；别人说的话不起草。" in rows.nth(1).inner_text() and "她那边" not in rows.nth(1).inner_text()   # (12 > 6)
+        assert card.locator(".prm-others-line").inner_text() == (
+            "她那边别的人（助理、商务）说的话也起草（群超过 6 人时只起草她本人的）；老板、我们自己的人和别的登记过的达人说的话不起草。")
+        page.locator("button[aria-label='展开 小美']").click()
+        linked.wait_for()
+        assert "她那边别的人（助理、商务）说的话也起草（群超过 6 人时只起草她本人的）" in linked.inner_text()
+        rows.nth(0).locator("button:has-text('是她')").click()
+        page.get_by_text("已接手「测试对接群」：测试达人甲，之后她和她那边的人在群里说的话会起草").wait_for()
+        assert posted == [{"chat": "test_group_61@chatroom", "wxid": "wxid_test_61a"}]
+
+    def test_deals_page_warns_of_a_name_of_ours_no_contact_has_and_says_why_a_group_was_asked_about(self, page, prm):
+        """我们自己的人 (PRM_GROUP_OURS, 2026-11-11): a name no one contact has is said on the groups card (``ours_warning``)
+        even with PRM_BOSS_GROUPS off and nothing to choose; a group the scan asks about with only one registered creator
+        says why it was not linked by itself (``why``)."""
+        now = prm.clock.now
+        warning = "PRM_GROUP_OURS 里的「测试同事」在这个微信里找不到 / 有重名：认出来以前，机器人不自己接群"
+        bg = {"enabled": False, "why_not": "", "warning": "", "boss": [], "boss_call": "老板", "pending": [],
+              "waiting": 0, "linked": 0, "ours": ["测试同事"], "ours_warning": warning}
+
+        def state_of(state):
+            state.update(boss_groups=json.loads(json.dumps(bg)))
+
+        self._serve_prm(page, state_of)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        card.wait_for()
+        assert card.locator(".prm-ours-warning").inner_text() == warning
+        assert card.locator(".prm-manual-group").count() == 0
+        bg["manual"] = [{"chat": "test_group_51@chatroom", "name": "测试单达人群", "size": 3, "asked_at": now,
+                         "until": None, "three_party": False, "by": "scan",
+                         "why": "PRM_GROUP_OURS 里有名字还没认出来，分不清群里谁是我们自己的人",
+                         "members": [{"wxid": "wxid_test_51a", "name": "测试达人甲", "registered": True, "stopped": False},
+                                     {"wxid": "wxid_test_51b", "name": "测试同事", "registered": False,
+                                      "stopped": False}]}]
+        page.reload()
+        row = page.locator(".prm-manual-group")
+        row.wait_for()
+        assert "机器人看到的群：没自动接" in row.inner_text() and "不止一位" not in row.inner_text()
+        assert row.locator(".prm-ask-why").inner_text() == ("为什么没自动接：PRM_GROUP_OURS 里有名字还没认出来，"
+                                                            "分不清群里谁是我们自己的人")
+
+    def test_deals_page_has_the_jie_qun_question_above_the_bosss_groups_and_its_buttons_on(self, page, prm):
+        """PRM_BOSS_GROUPS on, the scan unable to run (``why_not``: its buttons off): the admin's open question is on the
+        「老板拉的群」 card all the same, its 「是她」 on; her deal's own 三方群 says so."""
+        now = prm.clock.now
+        bg = {"enabled": True, "why_not": "先在设置里填 PRM_GROUP_WITH（老板在这个微信里的名字）", "warning": "", "boss": [],
+              "boss_call": "老板", "pending": [], "waiting": 0, "linked": 0, "manual": [
+                  {"chat": "test_group_32@chatroom", "name": "品牌测试×测试达人", "size": 3, "asked_at": now,
+                   "until": now + 1800, "three_party": True,
+                   "members": [{"wxid": "wxid_test_32a", "name": "测试达人", "registered": True, "stopped": False}]}]}
+        self._serve_prm(page, lambda state: state.update(boss_groups=json.loads(json.dumps(bg))))
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        card.locator(".prm-manual-group").wait_for()
+        assert card.locator(".card-head h2").inner_text() == "老板拉的群"
+        row = card.locator(".prm-manual-group")
+        assert "这是她的三方群（「拉三方群」建的，现在只读）" in row.inner_text()
+        assert not row.locator("button:has-text('是她')").is_disabled()
+        assert card.locator(".prm-manual-group").bounding_box()["y"] < card.locator(".note").first.bounding_box()["y"]
+
+    def test_deals_page_says_a_group_linked_by_hand_and_stops_it(self, page, prm):
+        """A deal whose 三方群 is a group the admin linked by hand (``by`` "manual") says 手动接的群 (not 老板拉的群) and what
+        the bot does there, with 「群已经不在了」 and 「不接了」 (the deal action ``group_unlink`` without a chat: it stays her
+        三方群, read only); a group linked by hand that is not her 三方群 (``linked_groups``) has a line of its own whose
+        「不接了」 posts ``group_unlink`` with its chat."""
+        import time as _time
+
+        prm.service.register("wxid_test_red", "小红")
+        now = prm.clock.now
+        posted = []
+
+        def linked(state):
+            state["three_party"] = {"enabled": True, "with": ["老板测试"], "why": "", "busy": None,
+                                    "name_template": "品牌测试×{昵称}"}
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01":
+                    p["deal"]["three_party"] = {"state": "created", "label": "已建好", "at": now, "by": "manual",
+                                                "why": "手动接的群", "chat_name": "小美的对接群", "made": True}
+                if p["wxid"] == "wxid_test_red" and p.get("deal"):
+                    p["deal"]["linked_groups"] = [{"chat": "test_group_33@chatroom", "name": "小红和商务的群", "at": now}]
+
+        answers = [{"ok": True, "three_party": True, "reading": True},
+                   {"ok": True, "three_party": True, "reading": False}]
+
+        def deal_post(route):
+            posted.append(route.request.post_data_json)
+            answer = answers.pop(0) if answers else {"ok": True}
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(answer))
+
+        self._serve_prm(page, linked)
+        page.route("**/api/prm/deals", deal_post)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.locator("button[aria-label='展开 小美']").click()
+        block = page.locator(".prm-group")
+        since = _time.strftime("%H:%M", _time.localtime(now))
+        text = block.inner_text()
+        assert f"手动接的群（{since} 接手）：微信里叫「小美的对接群」" in text and "运营在微信里接手了这个群" in text
+        assert "老板拉的群" not in text and "三方群已建好" not in text and block.locator("button:has-text('复制群名')").count() == 0
+        assert page.locator(".prm-linked-groups").count() == 0
+        assert "「不接了」：不再起草，它还是她的三方群，机器人只读" in text
+        block.locator("button:has-text('不接了')").click()
+        page.get_by_text("记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读").wait_for()
+        assert posted[-1]["action"] == "group_unlink" and "chat" not in posted[-1] and posted[-1]["deal_id"]
+        # (the bot answers it reads no group on this PC: the toast says so, not 「机器人只读」, 2026-11-09)
+        block.locator("button:has-text('不接了')").click()
+        page.get_by_text("记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，这台电脑读不了群，群里的话交不到她私聊的草稿").wait_for()
+        page.locator("button[aria-label='展开 小红']").click()
+        line = page.locator(".prm-linked-group")
+        line.wait_for()
+        assert f"「小红和商务的群」（{since} 接手）" in line.inner_text()
+        assert page.locator(".prm-group button:has-text('拉三方群')").count() == 1      # (no 三方群 of hers: as before)
+        line.locator("button:has-text('不接了')").click()
+        page.get_by_text("记下了：「小红和商务的群」不接了，群里的话不再起草").wait_for()
+        assert posted[-1]["action"] == "group_unlink" and posted[-1]["chat"] == "test_group_33@chatroom"
+
+    def test_deals_page_offers_bu_jie_le_on_a_boss_group_only_with_prm_boss_groups_on(self, page, prm):
+        """The 老板拉的群 block's 「不接了」 (2026-11-09) is there while PRM_BOSS_GROUPS is on (``boss_groups.enabled``) and
+        posts the deal action ``group_unlink`` without a chat."""
+        now = prm.clock.now
+        posted = []
+
+        def boss(state):
+            state["three_party"] = {"enabled": True, "with": ["老板测试"], "why": "", "busy": None,
+                                    "name_template": "品牌测试×{昵称}"}
+            state["boss_groups"] = {**(state.get("boss_groups") or {}), "enabled": True, "why_not": "", "warning": "",
+                                    "boss": ["老板测试"], "boss_call": "老板", "pending": [], "waiting": 0, "linked": 1}
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01":
+                    p["deal"]["three_party"] = {"state": "created", "label": "已建好", "at": now, "by": "boss",
+                                                "why": "老板拉的群", "chat_name": "小美的测试群", "made": True}
+
+        def deal_post(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "three_party": True, "reading": True}))
+
+        self._serve_prm(page, boss)
+        page.route("**/api/prm/deals", deal_post)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.locator("button[aria-label='展开 小美']").click()
+        block = page.locator(".prm-group")
+        block.locator("button:has-text('不接了')").click()
+        page.get_by_text("记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读").wait_for()
+        assert posted[-1]["action"] == "group_unlink" and "chat" not in posted[-1]
+
+    def test_review_page_offers_a_redraft_for_a_group_draft_that_did_not_hear_the_group(self, page, prm):
+        """A group draft whose automatic redrafts reached the cap (``unheard``, 2026-11-09) says how many lines of the
+        group it did not hear, and 「重新起草」 posts the packet action ``redraft``; a draft without it has neither."""
+        posted = []
+
+        def capped(state):
+            for p in state["pending"]:
+                if p["id"] == 2:
+                    p.update(channel="group", group_name="小美合作对接群", group_manual=True, unheard=4)
+
+        def packet_post(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "status": "redrafted"}))
+
+        self._serve_prm(page, capped)
+        page.route("**/api/prm/packets", packet_post)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        hint = page.locator(".prm-unheard")
+        hint.wait_for()
+        assert hint.count() == 1 and "群里别人又说了 4 句，这份草稿没听到" in hint.inner_text()
+        hint.locator("button:has-text('重新起草')").click()
+        page.get_by_text("在重新起草：写好的新草稿会换掉这一份").wait_for()
+        assert posted[-1] == {"id": 2, "action": "redraft"}
+
+    def test_review_page_lists_her_lines_a_closed_group_left_unanswered_until_done(self, page, prm):
+        """接手任何合作群 (2026-11-09): her lines in a group whose link ended before they were answered are never answered
+        in another chat: the 待审批 page lists them (``group_alerts``) until 「已处理」 posts ``group_left_done``."""
+        posted = []
+
+        def alerts(state):
+            state["group_alerts"] = [{"deal_id": 1, "party_id": 1, "party_name": "小美", "chat": "test_group_33@chatroom",
+                                      "text": "她在群「小美合作对接群」里还有 2 句话没回（群已经不接了），要回的话请到群里直接回",
+                                      "at": prm.clock.now}]
+
+        def deal_post(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+        self._serve_prm(page, alerts)
+        page.route("**/api/prm/deals", deal_post)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        banner = page.locator(".prm-group-alerts")
+        banner.wait_for()
+        text = banner.inner_text()
+        assert "小美 · 不接的群里还有话没回" in text and "还有 2 句话没回" in text and "不会在她的私聊里回" in text
+        banner.locator("button:has-text('已处理')").click()
+        page.get_by_text("已标为处理过了").wait_for()
+        assert posted[-1] == {"action": "group_left_done", "deal_id": 1, "chat": "test_group_33@chatroom"}
+
+    def test_review_page_says_a_draft_goes_into_a_group_linked_by_hand(self, page, prm):
+        """A draft for a group the admin linked by hand (``group_manual``): the tag and the question before it goes say
+        群「…」 and that the group sees it, never 老板拉的群; a boss group's draft keeps its words."""
+        def group(state):
+            for p in state["pending"] + state["recent"]:
+                if p["id"] == 2:
+                    p.update(channel="group", group_name="小美合作对接群", group_manual=True)
+
+        self._serve_prm(page, group)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has=page.locator(".prm-group-tag"))
+        tag = card.locator(".prm-group-tag")
+        tag.wait_for()
+        assert tag.get_attribute("title") == "发在群「小美合作对接群」里（不是她的私聊），群里的人都看得到"
+        card.locator("button:has-text('发送')").click()
+        dialog = page.locator("[role=dialog]")
+        text = dialog.inner_text()
+        assert "这条回复会发在群「小美合作对接群」里，不是她的私聊：群里的人都看得到。" in text and "老板" not in text
+        dialog.locator("button:has-text('再想想')").click()
+        dialog.wait_for(state="detached")
+        assert prm.service.store.packet(2)["status"] == "pending"
+
+    def test_review_and_deals_pages_say_why_what_the_bot_started_goes_to_the_group(self, page, prm):
+        """PRM_REACH_LAST_SPOKE (2026-11-11): a draft the bot started that goes to the group because her side last spoke
+        there (``reach`` "last_spoke") says so on its card, in its tag and in the question before it goes; her deal says
+        where what the bot starts goes now and why (``deal.reach``); a group draft without ``reach`` says nothing of it."""
+        reach = {"where": "group", "name": "小美合作对接群", "why": "last_spoke"}
+
+        def state_of(state):
+            for p in state["pending"] + state["recent"]:
+                if p["id"] == 2:
+                    p.update(channel="group", group_name="小美合作对接群", group_manual=True, reach="last_spoke")
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01" and p.get("deal"):
+                    p["deal"]["reach"] = dict(reach)
+
+        self._serve_prm(page, state_of)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has=page.locator(".prm-group-tag"))
+        card.wait_for()
+        why = "她那边最近是在这个群里说的话，所以机器人主动发的这一条也发在群里。"
+        assert why in card.locator(".prm-reach-why").inner_text()
+        assert why in card.locator(".prm-group-tag").get_attribute("title")
+        card.locator("button:has-text('发送')").click()
+        dialog = page.locator("[role=dialog]")
+        assert why in dialog.inner_text()
+        dialog.locator("button:has-text('再想想')").click()
+        dialog.wait_for(state="detached")
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.locator("button[aria-label='展开 小美']").click()
+        line = page.locator(".prm-reach")
+        line.wait_for()
+        assert "现在发在群「小美合作对接群」里：她那边最近是在这个群里说的话" in line.inner_text()
+        reach.update(where="private", why="last_private")
+        page.reload()
+        page.locator("button[aria-label='展开 小美']").click()
+        page.locator(".prm-reach", has_text="现在发在她的私聊里：她最近是在私聊里说的话").wait_for()
 
     def test_deals_page_shows_the_boss_group_settings(self, page, prm):
         """老板拉的群's two settings (src/web/advanced_config.py, the PRM side of 功能 U) show in 合作单's settings: the

@@ -40,8 +40,9 @@ import signal
 import subprocess
 import threading
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -152,10 +153,14 @@ ACTIONS = {
         "caveat": "商品还没在百应推广时，会先建推广（buyin promotion-create）：这条写命令还没在真实平台上跑过",
     },
     "dy.channel_goods": {
-        "platform": "dy", "label": "抖店 · 达人渠道品（专属链接）并绑定达人",
-        "required": ("item_id", "creator_platform_id"), "optional": ("price", "sku_ids", "stock", "exclusive"),
+        "platform": "dy", "label": "抖店 · 达人专属链接（渠道品）并绑定达人",
+        "required": ("item_id", "creator_platform_id"),
+        "optional": ("title_prefix", "exclusive", "sku_ids", "price", "stock_per_sku"),
+        "internal": ("convention",),           # set by check_action, never written by a draft (not in ACTION_SCHEMA)
         "link": True,
-        "effect": "从主商品建一个达人渠道品（新渠道品要平台审核，审核通过后生效），再把这位达人绑上去；两步都核验通过才把推广链接发给达人",
+        "effect": "照店里的做法从主商品建一个渠道品：专属达人带货（只绑这一位达人，库存不共享）、标题前缀「【某某专属】」、"
+                  "渠道价是每个 SKU 日常价的 9 折取整到元、每个颜色 100 件库存（主商品可分的不够就全分）、长期有效；"
+                  "再把这位达人绑上去（她要先有这个商品的专属佣金）；两步都核验通过才把推广链接发给达人",
         "caveat": "",
     },
     "dy.creator_invite": {
@@ -190,6 +195,7 @@ PARAM_LABELS = {
     "item_id": "商品 ID", "creator_platform_id": "达人平台账号", "commission_rate": "佣金率（%）",
     "sku_prices": "SKU 专属价（元）", "title": "商品标题", "short_title": "导购短标题", "price": "渠道价（元）",
     "sku_ids": "SKU", "stock": "渠道库存", "exclusive": "专属达人带货", "crowd_ids": "达摩盘人群包",
+    "title_prefix": "标题前缀", "stock_per_sku": "每个颜色的库存（件）",
     "creator_douyin_id": "达人抖音号", "invite_text": "邀约信息", "extra_item_ids": "其他推荐商品", "rights": "专属权益",
     "bid_target": "出价目标", "day_budget": "日预算（元）", "note": "说明",
     "shop": "发货店铺", "items": "寄样商品：SKU × 数量", "skus": "寄样 SKU × 数量", "creator_platform": "达人平台",
@@ -229,7 +235,8 @@ ACTION_SCHEMA = {
         "short_title": {"type": "string"},
         "price": {"type": "string"},
         "sku_ids": {"type": "array", "items": {"type": "string"}},
-        "stock": {"type": "integer"},
+        "title_prefix": {"type": "string"},
+        "stock_per_sku": {"type": "integer"},
         "exclusive": {"type": "boolean"},
         "creator_douyin_id": {"type": "string"},
         "invite_text": {"type": "string"},
@@ -291,6 +298,52 @@ _ORDER_NO = re.compile(r"^YP[0-9A-Za-z]{6,30}$")
 _DOUYIN_ID = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{1,63}$")  # an 抖音号, as douyin-engineering takes it
 _INVITE_PHONE = re.compile(r"^1[2-9]\d{9}$")                    # the invite drawer's 手机号 pattern
 _INVITE_WECHAT = re.compile(r"^[a-zA-Z_-][a-zA-Z\d_-]{5,19}$")  # and its 微信号 pattern
+
+# 专属链接 the shop's way (dy.channel_goods, 2026-11-09: Claude read the shop's 59 channel products and made 8 by hand;
+# douyin-engineering VALIDATION 第八十节): 专属达人带货, one creator bound, a stock of its own; the title prefix
+# 「【某某专属】」; the channel price the 直播价, 9 折 of each SKU's daily price floored to the yuan (kb §6); 100 a colour
+# (the user's 「每色 100 件（店里习惯）」), a colour the main product cannot spare that many of gets all it has; 长期有效.
+LIVE_PRICE_RATIO = Decimal("0.9")
+CHANNEL_STOCK_PER_SKU = 100
+MAX_CHANNEL_STOCK = 1_000_000
+MAX_CHANNEL_SKUS = 200                  # SKUs of one agreement the bot keeps (the CLI takes 500)
+# The page's prefix limit when its config names none (title_rule.name_prefix_max_length; the CLI's
+# NAME_PREFIX_MAX_DEFAULT), counted like the title: a Han character 2, anything else its UTF-16 length.  A product's own
+# limit is its config's: the CLI checks it and says it (``channelGoods.title.prefixMax``); a draft is held only to
+# TITLE_PREFIX_CAP here (review 2026-11-09 #8: not a hard-coded 12).
+TITLE_PREFIX_MAX = 12
+TITLE_PREFIX_CAP = 30
+NO_ASSIGNABLE = "主商品这个颜色没有可分的库存"
+# A dy.channel_goods action made the shop's way carries ``convention``: a worker or a bot from before 2026-11-09 refuses
+# the key (``extra_param``), so neither runs a new approval the old way (price following the main product, shared stock).
+CHANNEL_CONVENTION = 1
+# Script=Han as \p{sc=Han} (the page's counter; Unicode 15.1's ranges): standard library, Python 3.9.
+_HAN = re.compile("[\u2e80-\u2e99\u2e9b-\u2ef3\u2f00-\u2fd5\u3005\u3007\u3021-\u3029\u3038-\u303b\u3400-\u4dbf"
+                  "\u4e00-\u9fff\uf900-\ufa6d\ufa70-\ufad9\U00016fe2\U00016fe3\U00016ff0\U00016ff1"
+                  "\U00020000-\U0002a6df\U0002a700-\U0002b739\U0002b740-\U0002b81d\U0002b820-\U0002cea1"
+                  "\U0002ceb0-\U0002ebe0\U0002ebf0-\U0002ee5d\U0002f800-\U0002fa1d\U00030000-\U0003134a"
+                  "\U00031350-\U000323af]")
+# Brackets and quotes a draft may write a prefix in: the pair becomes 【】 (the shop's).
+_PREFIX_PAIRS = {"[": "]", "［": "］", "「": "」", "『": "』", "(": ")", "（": "）", "〔": "〕", "〖": "〗",
+                 "<": ">", "《": "》", "〈": "〉", "“": "”", "‘": "’", '"': '"', "'": "'", "＂": "＂", "＇": "＇"}
+PREFIX_PAIRS = _PREFIX_PAIRS                   # (the bot reads a deal's slot with them: service.link_wish)
+# Its closing bracket or quote -> the opening ones (a quote or bracket alone at an end goes: ``_unwrapped``).
+_PREFIX_OPENERS = {close: [o for o, c in _PREFIX_PAIRS.items() if c == close] for close in set(_PREFIX_PAIRS.values())}
+# A prefix that reads like contact details (buyers see it), looked for in its NFKC form (full-width letters and digits
+# as ASCII): 微信 (with a space in it too, 「微 信」), wx / vx / V 号, a run of five digits or more (spaces or dashes
+# between them too).
+_CONTACT_LIKE = re.compile(r"[微薇威]\s*信|(?<![a-z])(?:[vw]\s*x|v\s*信|v\s*[:：]|v\s*\d)|加\s*v|[+＋]\s*v|\d(?:[\s-]*\d){4,}",
+                           re.I)
+# What a prefix never has: the C0 and C1 controls and the two Unicode line separators (the CLI refuses \p{Cc}; U+2028 and
+# U+2029 break the line wherever the prefix is shown: review 2026-11-09 F7).
+_PREFIX_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# The start of a preview's problem with a prefix above its product's own limit (``_dy_read``): the bot sees that a
+# preview stopped at its prefix (``prefix_stopped``).
+PREFIX_LONG = "标题前缀太长"
+# What the bot announces to the Mac workers (GET /relay/health ``features``): it knows dy.channel_goods the shop's way
+# (``CHANNEL_CONVENTION``).  A worker puts no dy.channel_goods into a draft for a bot that does not say so (an older
+# one would keep the reply with {链接} and let it be sent as it is: review 2026-11-09 F5).
+CHANNEL_FEATURE = f"dy.channel_goods:{CHANNEL_CONVENTION}"
 
 
 def _err(code: str, message: str) -> ActionError:
@@ -360,7 +413,7 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
     if name not in ACTIONS:
         raise _err("unknown_action", f"不认识的平台动作：{str(name)[:40]}")
     spec = ACTIONS[name]
-    allowed = {"action", "note", *spec["required"], *spec["optional"]}
+    allowed = {"action", "note", *spec["required"], *spec["optional"], *spec.get("internal", ())}
     extra = sorted(k for k in raw if k not in allowed)
     if extra:
         raise _err("extra_param", f"{name} 不接受这些参数：{'、'.join(extra)}")
@@ -421,10 +474,18 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
         _cap_rate(rate, lim)
         out["commission_rate"] = _plain(rate)
     elif name == "dy.channel_goods":
+        # the shop's way by default (2026-11-09): 专属达人带货 with a 「【某某专属】」 prefix; the price and the stock
+        # the preview works out per SKU (9 折, 100 a colour) unless the draft names them
         out["creator_platform_id"] = _text_id(raw["creator_platform_id"], _DIGITS, "bad_creator", "达人的抖音 UID（数字）")
-        exclusive = raw.get("exclusive", False)
+        if raw.get("convention", CHANNEL_CONVENTION) != CHANNEL_CONVENTION or isinstance(raw.get("convention"), bool):
+            raise _err("bad_convention", "专属链接的做法版本不对（convention）：重新起草")
+        exclusive = raw.get("exclusive", True)
         if not isinstance(exclusive, bool):
             raise _err("bad_exclusive", "exclusive 要是 true 或 false")
+        if raw.get("title_prefix") not in (None, ""):
+            out["title_prefix"] = title_prefix_of(raw["title_prefix"])
+        elif exclusive:
+            raise _err("missing_prefix", _NO_PREFIX)
         out["exclusive"] = exclusive
         skus = raw.get("sku_ids") or []
         if not isinstance(skus, list) or len(skus) > lim["max_sku_prices"]:
@@ -439,18 +500,17 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
             clean.append(sku)
         if clean:
             out["sku_ids"] = clean
-        if raw.get("price") not in (None, ""):
+        if raw.get("price") not in (None, ""):            # every SKU at this price instead of its 9 折
             price = _price(raw["price"], "渠道价")
             for sku in clean or [s.get("id") for s in (item or {}).get("skus") or []] or [None]:
                 _hold_price(item, sku, price, lim)
             out["price"] = _plain_price(price)
-        stock = raw.get("stock")
+        stock = raw.get("stock_per_sku")                  # instead of 100 a colour (still capped at what it can spare)
         if stock is not None:
-            if isinstance(stock, bool) or not isinstance(stock, int) or not (0 <= stock <= 1_000_000):
-                raise _err("bad_stock", "渠道库存要是 0–1000000 的整数")
-            out["stock"] = stock
-        if exclusive and not stock:
-            raise _err("bad_stock", "专属达人带货的渠道品不能共用主商品库存：要给 stock（每个 SKU 划多少件）")
+            if isinstance(stock, bool) or not isinstance(stock, int) or not (1 <= stock <= MAX_CHANNEL_STOCK):
+                raise _err("bad_stock", f"每个颜色的库存（stock_per_sku）要是 1–{MAX_CHANNEL_STOCK} 的整数")
+            out["stock_per_sku"] = stock
+        out["convention"] = CHANNEL_CONVENTION
     elif name == "dy.creator_invite":
         out["creator_douyin_id"] = _text_id(raw["creator_douyin_id"], _DOUYIN_ID, "bad_creator", "达人的抖音号")
         out["invite_text"] = _free_text(raw["invite_text"], "bad_text", "邀约信息", INVITE_TEXT_MAX)
@@ -664,6 +724,115 @@ def _hold_price(item: Optional[dict], sku: Optional[str], price: Decimal, lim: d
                                     f"{int(Decimal(str(lim['min_price_ratio'])) * 100)}%，按这台 Mac 的设置不能用")
 
 
+# ── 专属链接 the shop's way (dy.channel_goods): the prefix, the price ────────
+
+_NO_PREFIX = ("专属链接要写标题前缀（title_prefix）：店里的做法是「【某某专属】」，按达人或老板说的填，"
+              "比如她说「前缀：小美专属」就写「【小美专属】」")
+
+
+def title_length(text) -> int:
+    """The page's count of a title or a title prefix (the CLI's ``titleLength``): a Han character counts 2,
+    anything else its UTF-16 length (an emoji 2, 【 and 】 1 each), so 「【三个字专属】」 is 12."""
+    return sum(2 if _HAN.match(ch) or ord(ch) > 0xFFFF else 1 for ch in str(text or ""))
+
+
+def title_prefix_of(value) -> str:
+    """A channel product's title prefix the shop's way, 「【小美专属】」: zero-width and other format characters and
+    the spaces at its ends go; one written in another pair of brackets or quotes ([] 「」 （） “” …) gets 【】
+    instead, one without brackets gets them, a quote or bracket alone at an end goes (``_unwrapped``).  Refused
+    (``bad_prefix``, the message says why): not text, a control character (C0, C1, U+2028 / U+2029:
+    ``_PREFIX_CONTROL``) or a brace, a 【 or 】 inside, one that reads like contact details (``_CONTACT_LIKE``:
+    buyers see it), and one above ``TITLE_PREFIX_CAP`` counted by ``title_length`` (the brackets too; the count is
+    said: a product's own limit, 12 unless its config says otherwise, is the CLI's to check at the preview).  Empty:
+    ``missing_prefix``."""
+    if not isinstance(value, str):
+        raise _err("bad_prefix", "标题前缀（title_prefix）要是文字，比如「【小美专属】」")
+    text = "".join(ch for ch in value if unicodedata.category(ch) != "Cf").strip()     # zero-width, BOM, bidi marks
+    if not text:
+        raise _err("missing_prefix", _NO_PREFIX)
+    if _PREFIX_CONTROL.search(text) or "{" in text or "}" in text:
+        raise _err("bad_prefix", "标题前缀里不能有换行、控制字符、花括号")
+    if _CONTACT_LIKE.search(unicodedata.normalize("NFKC", text)):
+        raise _err("bad_prefix", f"标题前缀「{_clip(text, 30)}」像联系方式（微信、V 号、一串数字）：前缀买家看得到，只写「【某某专属】」")
+    text = _unwrapped(text)
+    if not text:
+        raise _err("missing_prefix", _NO_PREFIX)
+    if "【" in text or "】" in text:
+        raise _err("bad_prefix", f"标题前缀「{_clip(value, 30)}」里的【】不成对：写成「【某某专属】」")
+    prefix = f"【{text}】"
+    counted = title_length(prefix)
+    if counted > TITLE_PREFIX_CAP:
+        raise _err("bad_prefix", f"标题前缀「{_clip(prefix, 30)}」是 {counted} 个字符（汉字算 2 个，【】各算 1 个），"
+                                 f"太长了（一般的商品最多 {TITLE_PREFIX_MAX} 个）：少写几个字（比如名字只留两三个字）")
+    return prefix
+
+
+def _unwrapped(text: str) -> str:
+    """A prefix without what is around it: 【】 or a pair of ``_PREFIX_PAIRS`` (a few deep), and a quote or bracket of
+    them alone at an end (「"小美专属」: review 2026-11-09 F7).  A 【 or 】 alone stays (``title_prefix_of`` refuses it)."""
+    for _ in range(4):
+        before = text
+        if text[:1] in _PREFIX_PAIRS and _PREFIX_PAIRS[text[0]] not in text[1:]:
+            text = text[1:].strip()
+        if text[-1:] in _PREFIX_OPENERS and not any(o in text[:-1] for o in _PREFIX_OPENERS[text[-1]]):
+            text = text[:-1].strip()
+        if len(text) >= 2 and ((text[0] == "【" and text[-1] == "】") or _PREFIX_PAIRS.get(text[0]) == text[-1]):
+            text = text[1:-1].strip()
+        if text == before:
+            break
+    return text
+
+
+def short_prefix(prefix: str, limit: int = TITLE_PREFIX_MAX) -> str:
+    """A prefix cut to ``limit`` (``title_length``) the shop's way: the name's first characters and 专属
+    (「【小美美呀专属】」 → 「【小美美专属】」); "" when not even one character of the name fits."""
+    inner = prefix[1:-1] if len(prefix) >= 2 and prefix[0] == "【" and prefix[-1] == "】" else prefix
+    name = inner.replace("专属", "").strip()
+    for end in range(len(name), 0, -1):
+        cut = f"【{name[:end].strip()}专属】"
+        if title_length(cut) <= limit:
+            return cut
+    return ""
+
+
+def prefix_stopped(block) -> bool:
+    """Did this dy.channel_goods preview stop at its title prefix: above the usual ``TITLE_PREFIX_MAX``, or above its
+    product's own limit (a problem that starts with ``PREFIX_LONG``)?  The bot asks again for a product whose link
+    draft was dropped so, once the deal has a prefix that fits (review 2026-11-09 F1)."""
+    if not isinstance(block, dict) or block.get("verdict") == "ready":
+        return False
+    action = block.get("action") if isinstance(block.get("action"), dict) else {}
+    if action.get("action") != "dy.channel_goods":
+        return False
+    if title_length(action.get("title_prefix") or "") > TITLE_PREFIX_MAX:
+        return True
+    texts = [*(block.get("problems") or []),
+             *(p for s in block.get("steps") or [] if isinstance(s, dict) for p in s.get("problems") or [])]
+    return any(str(t).startswith(PREFIX_LONG) for t in texts)
+
+
+def _amount(value) -> Optional[Decimal]:
+    """A price as the CLI prints it ("315.00") as a positive Decimal; None when it is not one."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        return None
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return number if number.is_finite() and number > 0 else None
+
+
+def live_price(main) -> Optional[Decimal]:
+    """The 直播价 of a daily price (``LIVE_PRICE_RATIO``: 9 折) floored to the yuan: 315 → 283, 290 → 261,
+    399 → 359, 188 → 169, 269 → 242.  None when the daily price is not a positive amount, or its 9 折 is
+    under 1 yuan."""
+    main = _amount(main)
+    if main is None:
+        return None
+    price = (main * LIVE_PRICE_RATIO).to_integral_value(rounding=ROUND_FLOOR)
+    return price if price >= 1 else None
+
+
 # ── the catalogue (kb/products.json, written by ``sync_catalog``) ─────────
 
 CATALOG_JSON = "kb/products.json"
@@ -741,7 +910,7 @@ def describe(action: Optional[dict], catalog_entry: Optional[dict] = None) -> li
         return []
     out = []
     for key, value in action.items():
-        if key == "action" or (key == "item_id" and "items" in action):    # a sample order lists its products
+        if key in ("action", "convention") or (key == "item_id" and "items" in action):    # (a sample order lists its products)
             continue
         if key == "sku_prices":
             value = "；".join(f"{p['sku_id']}：{p['price']} 元" for p in value)
@@ -750,7 +919,12 @@ def describe(action: Optional[dict], catalog_entry: Optional[dict] = None) -> li
         elif key == "rights":
             value = "、".join(INVITE_RIGHTS[r][1] for r in value)
         elif key == "exclusive":
-            value = "是（只给这一位达人）" if value else "否（达人带货，共用主商品库存）"
+            value = ("是（专属达人带货：只绑这一位达人，库存不共享）" if value else
+                     "否（达人带货" + ("" if "stock_per_sku" in action else "，共用主商品库存") + "）")
+        elif key == "title_prefix":
+            value = f"{value}（{title_length(value)} 个字符，汉字算 2 个；这个商品最多几个看预览）"
+        elif key == "stock_per_sku":
+            value = f"{value} 件（主商品这个颜色可分的不够就全分）"
         elif key == "bid_target":
             value = f"{BID_TARGETS.get(value, value)}（{value}）"
         elif key == "commission_rate":
@@ -766,6 +940,13 @@ def describe(action: Optional[dict], catalog_entry: Optional[dict] = None) -> li
         elif key in ("shop", "creator_platform"):
             value = f"{PLATFORMS.get(value, value)}（{value}）"
         out.append({"label": PARAM_LABELS.get(key, key), "value": str(value)})
+    if action.get("action") == "dy.channel_goods":        # what the shop's way fills in (the preview has the numbers)
+        if "price" not in action:
+            out.append({"label": PARAM_LABELS["price"], "value": "每个 SKU 日常价的 9 折，取整到元（每个 SKU 的数在预览里）"})
+        if "stock_per_sku" not in action and action.get("exclusive", True):
+            out.append({"label": PARAM_LABELS["stock_per_sku"],
+                        "value": f"{CHANNEL_STOCK_PER_SKU} 件（主商品这个颜色可分的不够就全分）"})
+        out.append({"label": "有效期", "value": "长期有效"})
     if catalog_entry and catalog_entry.get("title"):
         title = str(catalog_entry["title"])[:80]
         if len(action.get("items") or []) > 1:
@@ -915,6 +1096,39 @@ class CliRun:
         return " ".join(p if re.match(r"^[\w@%+=:,./-]+$", p) else json.dumps(p, ensure_ascii=False) for p in parts)
 
 
+# The CLI commands this process runs now (``run_cli``): each in a process group of its own, which a signal to this
+# process does not reach; ``stop_running`` stops them (``--sync-products`` told to stop).
+_RUNNING: set = set()
+_RUNNING_LOCK = threading.RLock()     # (re-entrant: ``stop_running`` runs in a signal handler, maybe inside run_cli's
+                                      # own add or remove on the same thread)
+
+
+def stop_running(grace: float = 3.0) -> int:
+    """Stop every platform CLI this process runs now: SIGINT to each one's group, SIGKILL to whatever still runs after
+    ``grace`` seconds.  How many there were."""
+    with _RUNNING_LOCK:
+        procs = list(_RUNNING)
+    for proc in procs:
+        _signal_group(proc, signal.SIGINT)
+    deadline = time.monotonic() + grace
+    while procs and time.monotonic() < deadline and any(p.poll() is None for p in procs):
+        time.sleep(0.1)
+    for proc in procs:
+        if proc.poll() is None:
+            _signal_group(proc, signal.SIGKILL)
+    return len(procs)
+
+
+def _signal_group(proc: subprocess.Popen, sig) -> None:
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(proc.pid, sig)
+        else:
+            proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
 def _stop(proc: subprocess.Popen) -> None:
     """SIGINT to the command's group (it ends its request cleanly), SIGKILL if it stays."""
     for sig in (signal.SIGINT, signal.SIGKILL):
@@ -949,6 +1163,18 @@ def run_cli(argv: list, cwd, *, timeout: float, env: Optional[dict] = None,
                                 start_new_session=True)
     except OSError as e:
         return CliRun(argv, None, "", "", 0.0, error=f"启动不了：{e}")
+    with _RUNNING_LOCK:
+        _RUNNING.add(proc)
+    try:
+        return _run_to_end(proc, argv, started, timeout, heartbeat, every, interruptible)
+    finally:
+        with _RUNNING_LOCK:
+            _RUNNING.discard(proc)
+
+
+def _run_to_end(proc: subprocess.Popen, argv: list, started: float, timeout: float, heartbeat, every: float,
+                interruptible: bool) -> CliRun:
+    """``run_cli``'s wait for one started command."""
     chunks = {"out": b"", "err": b""}
 
     def read(name, stream):
@@ -997,9 +1223,10 @@ class CliLock:
     (mac review C#1: the cancel used to be ignored and the write went ahead)."""
 
     def __init__(self, path, wait: float = 600.0, heartbeat: Optional[Callable[[], bool]] = None,
-                 every: float = 30.0):
+                 every: float = 30.0, on_wait: Optional[Callable[[], None]] = None):
         self.path, self.wait, self.handle, self.heartbeat = Path(path), wait, None, heartbeat
         self.every = every
+        self.on_wait = on_wait           # called once when the lock is taken and the wait begins
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1008,11 +1235,15 @@ class CliLock:
             return self
         deadline = time.monotonic() + self.wait
         beat = time.monotonic()
+        waiting = False
         while True:
             try:
                 fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return self
             except OSError:
+                if not waiting and self.on_wait is not None:
+                    self.on_wait()
+                waiting = True
                 if time.monotonic() >= deadline:
                     self.handle.close()
                     raise TimeoutError(f"等了 {int(self.wait)} 秒，另一个平台命令还在跑（{self.path}）")
@@ -1212,7 +1443,10 @@ def _execute_outcome(run: CliRun, data, rows: list, step: dict) -> str:
 DY_STEPS = {
     "designated": ("百应 · 建指定达人佣金策略", ("buyin", "promotion-strategy-create-designated")),
     "promotion": ("百应 · 给商品建推广（还没推广时）", ("buyin", "promotion-create")),
-    "create": ("抖店 · 建达人渠道品", ("fxg", "channel-goods-create")),
+    "bound": ("抖店 · 查她是不是已经绑在这个商品的渠道品上", ("fxg", "channel-goods-list")),
+    "leftover": ("抖店 · 查上次建好、没绑上她的渠道品还在不在", ("fxg", "channel-goods-list")),
+    "read": ("抖店 · 读主商品的 SKU、日常价和可分库存", ("fxg", "channel-goods-create")),
+    "create": ("抖店 · 按约定建渠道品", ("fxg", "channel-goods-create")),
     "bind": ("抖店 · 渠道品绑定达人", ("fxg", "channel-goods-bind")),
     "invite": ("百应 · 达人广场邀约带货", ("buyin", "author-invite")),
 }
@@ -1239,21 +1473,44 @@ _LINK_HOSTS = {"dy": (".jinritemai.com", ".douyin.com", ".snssdk.com"),
                "xhs": (".xiaohongshu.com", ".xhslink.com")}
 
 
-def _dy_argv(cfg: dict, step: str, action: dict, *, execute: bool, channel_id: str = "", expect: Optional[dict] = None) -> list:
+def _dy_argv(cfg: dict, step: str, action: dict, *, execute: bool, channel_id: str = "", expect: Optional[dict] = None,
+             agreement_file: str = "") -> list:
     a = action
     if step == "designated":
         opts = [f"--id={a['item_id']}", f"--uid={a['creator_platform_id']}", f"--to={a['commission_rate']}",
                 "--end=long"]
     elif step == "promotion":
         opts = [f"--id={a['item_id']}"]
-    elif step == "create":
-        opts = [f"--product-id={a['item_id']}", "--sale-channel=" + ("kol-exclusive" if a.get("exclusive") else "kol")]
+    elif step == "bound":
+        # the channel products of this main product she is bound to (the 渠道商品管理 list's kol_id filter): read only
+        if execute:
+            raise _err("bad_step", "查渠道品这一步只读")
+        opts = [f"--product-id={a['item_id']}", f"--uid={a['creator_platform_id']}"]
+    elif step == "leftover":
+        # every channel product of this main product, without the UID filter (that one shows only the ones she is
+        # bound to): read only
+        if execute:
+            raise _err("bad_step", "查渠道品这一步只读")
+        opts = [f"--product-id={a['item_id']}"]
+    elif step == "read":
+        # the main product as the create form reads it (its SKUs, daily prices, assignable stock), never executed: as
+        # 达人带货 sharing the main product's stock, so that no stock stops the read (专属达人带货 without a stock is
+        # 增 0 on every SKU, which the page refuses for a colour whose assignable stock is below 0)
+        if execute:
+            raise _err("bad_step", "读主商品这一步只预览")
+        opts = [f"--product-id={a['item_id']}", "--sale-channel=kol"]
         if a.get("sku_ids"):
             opts.append("--sku-id=" + ",".join(a["sku_ids"]))
-        if a.get("price"):
-            opts.append(f"--price={a['price']}")
-        if a.get("stock") is not None:
-            opts.append(f"--stock={int(a['stock'])}")
+        if a.get("title_prefix"):
+            # the product's own prefix rule is checked here already (its config's name_prefix_max_length; a product
+            # whose config makes a prefix required blocks a read without one)
+            opts.append(f"--title-prefix={a['title_prefix']}")
+    elif step == "create":
+        # the agreement (``channel_agreement``) carries the product, the channel, the prefix and every SKU's price and
+        # stock: the CLI takes no flag of those next to it (douyin-engineering FLAGS_REPLACED_BY_AGREEMENT)
+        if not agreement_file or _CONTROL.search(agreement_file) or agreement_file.startswith("-"):
+            raise _err("bad_plan", "建渠道品要带约定文件（--agreement）")
+        opts = [f"--agreement={agreement_file}"]
     elif step == "bind":
         if not _DIGITS.match(str(channel_id)):
             raise _err("bad_channel", "渠道品 ID 不对")
@@ -1281,9 +1538,13 @@ def _dy_argv(cfg: dict, step: str, action: dict, *, execute: bool, channel_id: s
     return [cfg["node"], CLI_FILES["dy"], *DY_STEPS[step][1], *opts, *(["--execute"] if execute else [])]
 
 
-def _dy_preview(cfg: dict, step: str, action: dict, run_one, channel_id: str = "") -> tuple:
-    """One dy preview: ``(step record, data)``."""
-    run = run_one(_dy_argv(cfg, step, action, execute=False, channel_id=channel_id), "dy", False)
+def _dy_preview(cfg: dict, step: str, action: dict, run_one, channel_id: str = "",
+                agreement: Optional[dict] = None) -> tuple:
+    """One dy preview: ``(step record, data)``; ``agreement``: the channel product's (``create``), in a temp file."""
+    if agreement is not None:
+        run = _dy_agreement_run(cfg, agreement, run_one, execute=False)
+    else:
+        run = run_one(_dy_argv(cfg, step, action, execute=False, channel_id=channel_id), "dy", False)
     data = parse_json(run.stdout)
     rows = _rows(data)
     rec = _step(step, DY_STEPS[step][0], run, False)
@@ -1304,6 +1565,9 @@ def _dy_facts(step: str, data: dict, rec: dict, action: dict) -> None:
     if step == "create" and goods:
         channel = goods.get("saleChannel") or {}
         rec["facts"].append(_fact("渠道类型", channel.get("label") or channel.get("option") or ""))
+        title = goods.get("title") if isinstance(goods.get("title"), dict) else {}
+        if title.get("prefix"):
+            rec["facts"].append(_fact("标题前缀", f"{title['prefix']}（{title.get('prefixCounted')}/{title.get('prefixMax')} 个字符）"))
         for sku in goods.get("skus") or []:
             if isinstance(sku, dict):
                 rec["facts"].append(_fact(f"SKU {sku.get('skuId')} {sku.get('name') or ''}",
@@ -1416,6 +1680,381 @@ def _dy_created(data) -> dict:
     return out
 
 
+# ── 专属链接 (dy.channel_goods): the agreement, the shop's way ───────────────
+# The preview reads the main product first (``read``: the create command without an agreement, as 达人带货 so that
+# nothing about stock stops a read; its SKUs, daily prices and assignable stock), works out the agreement
+# (``channel_skus``: 9 折, 100 a colour) and previews again with it (``create --agreement``): that one's verdict is the
+# action's.  The approval carries the agreement (``run.skus``: each SKU's price and stock and the daily price it was
+# worked out from), held to the shop's way again on the bot's side (``_channel_plan``); the execution previews once
+# more with it right before the write (a daily price that moved since: NOT_RUN, nothing written).  The CLI takes the
+# agreement as a JSON file: written 0600 to a temp file for the one run, removed right after (``_dy_agreement_run``).
+
+def _sale_channel(action: dict) -> str:
+    """The CLI's --sale-channel / saleChannel: 专属达人带货 (the default) or 达人带货."""
+    return "kol-exclusive" if action.get("exclusive", True) else "kol"
+
+
+def _wants_stock(action: dict) -> Optional[int]:
+    """How many of each colour the channel product gets at most: ``stock_per_sku``, else ``CHANNEL_STOCK_PER_SKU``
+    for 专属达人带货 (it cannot share the main product's); None: 达人带货 sharing the main product's stock."""
+    if action.get("stock_per_sku"):
+        return int(action["stock_per_sku"])
+    return CHANNEL_STOCK_PER_SKU if action.get("exclusive", True) else None
+
+
+def _colours(whats: list, limit: int = 300) -> str:
+    """Colours for a person, 「SKU a（均码米白）、SKU b」, as many as fit in ``limit`` characters, then how many more."""
+    shown, used = [], 0
+    for what in whats:
+        if shown and used + len(what) + 1 > limit:
+            break
+        shown.append(what)
+        used += len(what) + 1
+    return "、".join(shown) + (f" 等 {len(whats)} 个" if len(shown) < len(whats) else "")
+
+
+def channel_skus(rows, action: dict) -> tuple:
+    """``(skus, warnings, problems)``: the agreement's SKUs worked out the shop's way from the main product as the
+    CLI read it (``rows``: the read's ``channelGoods.skus``, ``{skuId, name, mainPrice, assignableStock}``).  The
+    price is ``action.price`` or the SKU's 直播价 (``live_price``: 9 折 floored to the yuan); the stock
+    (``_wants_stock``) is capped at what the main product can still assign: a colour with none gets 0 (warned:
+    ``NO_ASSIGNABLE``), one the platform said nothing about 0 too (warned), one whose assignable stock is below 0
+    is left out (the page refuses any stock for it, 0 too; warned).  Each SKU is ``{id, name, main_price, price,
+    stock, assignable}`` (``stock`` None: shared).  ``warnings``: one line per kind, every colour of it named in it
+    (one colour: 「SKU a（均码米白）：主商品这个颜色没有可分的库存，渠道品里这个颜色 0 件」), so that a product of many
+    colours keeps its price lines in the console (review 2026-11-09 #10).  ``problems``: why there is no agreement
+    (a daily price not read, a price of the draft's above a colour's daily price, no SKU at all, no stock in any
+    colour, too many SKUs)."""
+    per = _wants_stock(action)
+    fixed = _amount(action.get("price")) if action.get("price") else None
+    skus, problems = [], []
+    unknown, none_left, over = [], [], []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        sku = str(row.get("skuId") or "")
+        name = _clip(row.get("name") or "", 40)
+        what = f"SKU {sku}" + (f"（{name}）" if name else "")
+        if not _DIGITS.match(sku):
+            problems.append(f"读主商品的结果里有一个 SKU 编号不对：{_clip(sku, 40)}")
+            continue
+        if any(s["id"] == sku for s in skus):
+            problems.append(f"读主商品的结果里 {what} 出现了两次")
+            continue
+        main = _amount(row.get("mainPrice"))
+        price = fixed if fixed is not None else live_price(main)
+        if price is None:
+            problems.append(f"{what}：没读到日常价（或者日常价太低），算不出 9 折的渠道价；要用别的价就在动作里写 price")
+            continue
+        if fixed is not None and main is None:
+            # a daily price not known: the price of the draft cannot be held to it (review 2026-11-09, item 5's gap)
+            problems.append(f"{what}：没读到日常价，动作里写的渠道价 {_plain_price(fixed)} 元没法核对（渠道价不能比日常价高）；"
+                            "过一会儿点「重新预览」")
+            continue
+        if fixed is not None and fixed > main:
+            problems.append(f"{what}：动作里写的渠道价 {_plain_price(fixed)} 元比这个颜色的日常价 {_plain_price(main)} 元还高")
+            continue
+        assignable = row.get("assignableStock") if _is_int(row.get("assignableStock")) else None
+        stock = None
+        if per is not None:
+            if assignable is None:
+                stock = 0
+                unknown.append(what)
+            elif assignable < 0:
+                over.append((what, assignable))
+                continue
+            elif assignable == 0:
+                stock = 0
+                none_left.append(what)
+            else:
+                stock = min(per, assignable)
+        skus.append({"id": sku, "name": name, "main_price": _plain_price(main) if main is not None else "",
+                     "price": _plain_price(price), "stock": stock, "assignable": assignable})
+    warnings = []
+    if len(none_left) == 1:
+        warnings.append(f"{none_left[0]}：{NO_ASSIGNABLE}，渠道品里这个颜色 0 件")
+    elif none_left:
+        warnings.append(f"主商品这 {len(none_left)} 个颜色没有可分的库存，渠道品里这些颜色 0 件：{_colours(none_left)}")
+    if len(unknown) == 1:
+        warnings.append(f"{unknown[0]}：平台没说主商品这个颜色还能分多少库存，渠道品里这个颜色先放 0 件")
+    elif unknown:
+        warnings.append(f"平台没说主商品这 {len(unknown)} 个颜色还能分多少库存，渠道品里这些颜色先放 0 件：{_colours(unknown)}")
+    if len(over) == 1:
+        warnings.append(f"{over[0][0]}：主商品这个颜色可分的库存是 {over[0][1]}（已经分超了），渠道品里不放这个颜色")
+    elif over:
+        warnings.append(f"主商品这 {len(over)} 个颜色可分的库存小于 0（已经分超了），渠道品里不放这些颜色："
+                        + _colours([f"{what} 是 {n}" for what, n in over]))
+    if not problems and not skus:
+        problems.append("读主商品的结果里没有能放进渠道品的 SKU")
+    elif not problems and per is not None and not any(s["stock"] for s in skus):
+        problems.append("主商品的每个颜色都没有可分的库存：专属链接建出来也卖不了，先不建（主商品补了库存以后点「重新预览」）")
+    if len(skus) > MAX_CHANNEL_SKUS:
+        problems.append(f"这个商品有 {len(skus)} 个 SKU，一个渠道品最多放 {MAX_CHANNEL_SKUS} 个：在动作里用 sku_ids 选")
+    return skus, warnings, problems
+
+
+def channel_agreement(action: dict, skus: list) -> dict:
+    """The agreement file of ``fxg channel-goods-create --agreement`` (douyin-engineering's AGREEMENT_KEYS): the main
+    product, the channel (专属达人带货 = kol-exclusive), every SKU with its price (yuan, text) and stock (left out
+    when the stock is shared), the prefix, the action's note.  No period: 长期有效."""
+    out = {"productId": action["item_id"], "saleChannel": _sale_channel(action),
+           "skus": [{"id": s["id"], "price": s["price"], **({} if s.get("stock") is None else {"stock": int(s["stock"])})}
+                    for s in skus]}
+    if action.get("title_prefix"):
+        out["titlePrefix"] = action["title_prefix"]
+    if action.get("note"):
+        out["note"] = action["note"]
+    return out
+
+
+def _dy_agreement_run(cfg: dict, agreement: dict, run_one, *, execute: bool) -> CliRun:
+    """One channel-goods-create run with ``agreement`` in a private temp file (0600: ``mkstemp``), removed
+    afterwards, whatever happened."""
+    import tempfile
+
+    fd, path = tempfile.mkstemp(prefix="webot-dy-agreement-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(agreement, f, ensure_ascii=False)
+        return run_one(_dy_argv(cfg, "create", {}, execute=execute, agreement_file=path), "dy", execute)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _dy_bound(cfg: dict, action: dict, run_one) -> tuple:
+    """Is she bound to a channel product of this main product already (``bound``: ``fxg channel-goods-list
+    --product-id --uid``, read only)?  The bot knows only the links it made (2026-11-09: 8 were made by hand), and a
+    second one for the same creator and product would be created, its stock taken from the product, and then refused
+    at the bind (the platform's 「无法创建提示」).  ``(step record, rows)``: ``blocked`` with the channel products she
+    is on (their link among the facts, when it is the platform's); a login, wall or other account stops as the CLI
+    said; a list that could not be read whole (another exit, no ``rows``, not ``complete``) is ``error`` (rows None):
+    not knowing is never a yes, a preview cannot be approved and an execution does not write (review 2026-11-09 #1).
+    (2026-11-09: the real list with the bound creator's UID gave her channel product, with another one's none,
+    ``complete`` true.)"""
+    run = run_one(_dy_argv(cfg, "bound", action, execute=False), "dy", False)
+    data = parse_json(run.stdout)
+    rec = _step("bound", DY_STEPS["bound"][0], run, False)
+    rows = data.get("rows") if isinstance(data, dict) else None
+    if run.exit_code in _EXIT_VERDICT:
+        rec["verdict"] = _EXIT_VERDICT[run.exit_code]
+        rec["problems"].append(_exit_problem(run))
+        return rec, None
+    rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+    if not rows and (run.error or run.stopped or run.exit_code != 0 or rows is None or data.get("complete") is not True):
+        why = (_exit_problem(run) if run.error or run.stopped or run.exit_code
+               else "命令没有给出列表" if rows is None else "列表没读全")
+        rec["verdict"] = "error"
+        rec["problems"].append(f"查不到她是不是已经绑在这个商品的渠道品上（{why}）：平台没有动；过一会儿点「重新预览」")
+        return rec, None
+    rec["verdict"] = "blocked" if rows else "ready"
+    for row in rows[:5]:
+        channel = _clip(row.get("channelId"), 40)
+        rec["problems"].append(f"她已经绑在这个商品的渠道品 {channel} 上了（{_clip(row.get('saleChannel') or '', 20)}，"
+                               f"{_clip(row.get('statusName') or row.get('status'), 20)}）：不再建第二个；链接在抖店"
+                               "「渠道商品管理」里复制，要换新的就先在那里解绑或删掉旧的")
+        link = check_link(str(row.get("link") or ""), "dy")
+        if link:
+            rec["facts"].append(_fact(f"渠道品 {channel} 的链接", link))
+    if not rows:
+        rec["facts"].append(_fact("查过", "她还没绑在这个商品的渠道品上"))
+    return rec, rows
+
+
+def leftover_text(channels: list) -> str:
+    """A create refused because channel products an earlier approval made for her and did not bind are still there."""
+    return f"上次建好、没绑上的渠道品 {'、'.join(channels)} 还在：先在抖店绑上她或删掉"
+
+
+def _dy_leftover(cfg: dict, action: dict, run_one, channels: list) -> tuple:
+    """Are the channel products an earlier approval of this product made for her and did not bind (``channels``, the
+    bot's record: ``context.leftover``) still there (review 2026-11-09 F3)?  ``fxg channel-goods-list --product-id``
+    without the UID filter, read only: the filter shows only the ones she is bound to, and ``_dy_bound`` found none.
+    ``(step record, still)``: ``still`` the ones listed now (``[]``: gone); None when the list did not say (not read,
+    not whole): not knowing is never a yes, nothing is written."""
+    run = run_one(_dy_argv(cfg, "leftover", action, execute=False), "dy", False)
+    data = parse_json(run.stdout)
+    rec = _step("leftover", DY_STEPS["leftover"][0], run, False)
+    rows = data.get("rows") if isinstance(data, dict) and isinstance(data.get("rows"), list) else None
+    listed = {str(r.get("channelId")) for r in rows or [] if isinstance(r, dict)}
+    still = [c for c in channels if c in listed]
+    if still:
+        rec["verdict"] = "blocked"
+        rec["problems"].append(leftover_text(still))
+        return rec, still
+    if run.error or run.stopped or run.exit_code != 0 or rows is None or data.get("complete") is not True:
+        rec["verdict"] = _EXIT_VERDICT.get(run.exit_code, "error")
+        why = (_exit_problem(run) if run.error or run.stopped or run.exit_code
+               else "命令没有给出列表" if rows is None else "列表没读全")
+        rec["problems"].append(f"查不到上次建好、没绑上的渠道品 {'、'.join(channels)} 还在不在（{why}）")
+        return rec, None
+    rec["verdict"] = "ready"
+    rec["facts"].append(_fact("查过", f"上次建好、没绑上的渠道品 {'、'.join(channels)} 已经不在了"))
+    return rec, []
+
+
+def _dy_read(cfg: dict, action: dict, run_one) -> tuple:
+    """The first read of a channel product's preview (``read``): the create command for the main product without an
+    agreement (its price, stock and prefix are not ours), for its SKUs and what stops the product at all.
+    ``(step record, data)``; ``ready`` only with SKUs."""
+    run = run_one(_dy_argv(cfg, "read", action, execute=False), "dy", False)
+    data = parse_json(run.stdout)
+    rec = _step("read", DY_STEPS["read"][0], run, False)
+    rec["verdict"] = _preview_verdict(run, data, _rows(data), rec)
+    rec["facts"] = [f for f in rec["facts"] if f["label"] != "将写入"]        # (what a read would write is not ours)
+    goods = data.get("channelGoods") if isinstance(data, dict) and isinstance(data.get("channelGoods"), dict) else {}
+    title = goods.get("title") if isinstance(goods.get("title"), dict) else {}
+    over = False
+    if _is_int(title.get("prefixCounted")) and _is_int(title.get("prefixMax")):
+        rec["facts"].append(_fact("标题前缀", f"{_clip(title.get('prefix'), 40)}（{title['prefixCounted']}/{title['prefixMax']} 个字符，"
+                                             "这个商品的上限）"))
+        if title["prefixCounted"] > title["prefixMax"]:
+            # one line, in Chinese: the CLI's own lines of it go (review 2026-11-09 F7)
+            over = True
+            rec["problems"] = [p for p in rec["problems"] if "the title prefix is " not in p]
+            short = short_prefix(str(title.get("prefix") or action.get("title_prefix") or ""), title["prefixMax"])
+            rec["problems"].append(f"{PREFIX_LONG}：「{_clip(title.get('prefix'), 40)}」是 {title['prefixCounted']} 个字符"
+                                   f"（汉字算 2 个），这个商品最多 {title['prefixMax']} 个：少写几个字"
+                                   + (f"，比如「{short}」（名字留前几个字加「专属」）" if short else "（比如名字只留两三个字）"))
+    for text in goods.get("blockers") or []:
+        line = _clip(text, 300)
+        if over and line.startswith("the title prefix is "):
+            continue
+        if "name_prefix_required" in line and not action.get("title_prefix"):
+            line = "这个商品要求写标题前缀（title_prefix，写成「【某某专属】」）：" + line
+        if line not in rec["problems"]:
+            rec["problems"].append(line)
+    skus = [s for s in goods.get("skus") or [] if isinstance(s, dict)]
+    if rec["verdict"] == "ready" and not skus:
+        rec["verdict"] = "error"
+        rec["problems"].append("读主商品的结果里没有 SKU（channelGoods.skus）")
+    elif skus:
+        rec["facts"].append(_fact("读到", f"{len(skus)} 个 SKU 的日常价和主商品可分的库存"))
+    return rec, data
+
+
+def _channel_mismatch(skus: list, data, prices: bool = True) -> list:
+    """Why a preview with the agreement does not show the agreement (``[]``: it does): a SKU missing or one more, a
+    daily price that moved since it was worked out (its 9 折 is another now), a channel price or a stock the CLI
+    would send otherwise.  ``prices`` False (a create's own result): only the daily prices, of the SKUs it lists."""
+    goods = data.get("channelGoods") if isinstance(data, dict) and isinstance(data.get("channelGoods"), dict) else {}
+    rows = {str(r.get("skuId")): r for r in goods.get("skus") or [] if isinstance(r, dict)}
+    out = []
+    for s in skus:
+        row = rows.pop(s["id"], None)
+        what = f"SKU {s['id']}" + (f"（{s['name']}）" if s.get("name") else "")
+        if row is None:
+            if prices:
+                out.append(f"按约定预览的结果里没有 {what}")
+            continue
+        if s.get("main_price") and _amount(row.get("mainPrice")) != Decimal(s["main_price"]):
+            out.append(f"{what} 的日常价变了：{s['main_price']} → {_clip(row.get('mainPrice'), 20)} 元，按 9 折算的渠道价不对了")
+        if not prices:
+            continue
+        if _amount(row.get("channelPrice")) != Decimal(s["price"]):
+            out.append(f"{what}：命令行要发的渠道价是 {_clip(row.get('channelPrice'), 30)}，约定的是 {s['price']} 元")
+        if s.get("stock") is not None:
+            stock = re.search(r"\d+", str(row.get("channelStock") or ""))
+            if stock is None or int(stock.group(0)) != int(s["stock"]):
+                out.append(f"{what}：命令行要发的库存是 {_clip(row.get('channelStock'), 30)}，约定的是 {s['stock']} 件")
+    if prices:
+        out.extend(f"按约定预览的结果里多了约定里没有的 SKU {_clip(sku, 40)}" for sku in rows)
+    return out
+
+
+def _channel_plan(action: dict, plan: dict) -> dict:
+    """The agreement an approval of dy.channel_goods holds (the preview's ``run.skus``), held to the shop's way once
+    more (the bot checks what the Mac worked out, and the Mac what the bot hands back): each SKU once, one of
+    ``sku_ids`` when the action names them; its price ``action.price``, or exactly the 9 折 of the daily price it was
+    worked out from; its stock 0 up to ``_wants_stock`` (none when the stock is shared), and some stock in some colour
+    for 专属达人带货."""
+    skus = plan.get("skus")
+    if not isinstance(skus, list) or not skus or len(skus) > MAX_CHANNEL_SKUS:
+        raise _err("bad_plan", "批准里没有渠道品的约定（每个 SKU 的渠道价和库存）：点「重新预览」")
+    per = _wants_stock(action)
+    fixed = _amount(action.get("price")) if action.get("price") else None
+    out = []
+    for entry in skus:
+        if not isinstance(entry, dict) or set(entry) - {"id", "price", "stock", "main_price"}:
+            raise _err("bad_plan", "渠道品约定里的每个 SKU 写成 {id, price, stock, main_price}")
+        sku = _text_id(entry.get("id"), _DIGITS, "bad_plan", "渠道品约定里的 SKU ID")
+        if any(s["id"] == sku for s in out):
+            raise _err("bad_plan", f"渠道品约定里 SKU {sku} 写了两次")
+        if action.get("sku_ids") and sku not in action["sku_ids"]:
+            raise _err("bad_plan", f"渠道品约定里的 SKU {sku} 不是动作里写的（sku_ids）")
+        price = _price(entry.get("price"), f"渠道品约定里 SKU {sku} 的渠道价")
+        main = None
+        if entry.get("main_price") not in (None, ""):
+            main = _amount(entry["main_price"])
+            if main is None or main != main.quantize(Decimal("0.01")):
+                raise _err("bad_plan", f"渠道品约定里 SKU {sku} 的日常价不对：{_clip(entry['main_price'], 20)}")
+        if fixed is not None:
+            if price != fixed:
+                raise _err("bad_plan", f"渠道品约定里 SKU {sku} 的渠道价 {_plain_price(price)} 元不是动作里写的 "
+                                       f"{_plain_price(fixed)} 元")
+            if main is None:
+                raise _err("bad_plan", f"渠道品约定里 SKU {sku} 没有日常价：动作里写的渠道价没法核对（不能比日常价高），"
+                                       "点「重新预览」")
+            if price > main:
+                raise _err("bad_plan", f"渠道品约定里 SKU {sku} 的渠道价 {_plain_price(price)} 元比日常价 "
+                                       f"{_plain_price(main)} 元还高")
+        elif main is None or price != live_price(main):
+            raise _err("bad_plan", f"渠道品约定里 SKU {sku} 的渠道价 {_plain_price(price)} 元不是日常价"
+                                   + (f" {_plain_price(main)} 元" if main is not None else "（没写）") + "的 9 折取整")
+        stock = entry.get("stock")
+        if per is None:
+            if stock is not None:
+                raise _err("bad_plan", "这个渠道品共用主商品库存，约定里不该写库存")
+        elif not _is_int(stock) or not (0 <= stock <= per):
+            raise _err("bad_plan", f"渠道品约定里 SKU {sku} 的库存要是 0–{per} 件")
+        out.append({"id": sku, "price": _plain_price(price), "stock": stock,
+                    "main_price": _plain_price(main) if main is not None else ""})
+    if per is not None and not any(s["stock"] for s in out):
+        raise _err("bad_plan", "渠道品约定里每个颜色都是 0 件：建出来也卖不了")
+    return {"skus": out}
+
+
+def _channel_facts(action: dict, skus: list, warnings: list, data) -> list:
+    """What the console shows of a dy.channel_goods preview before the commands' detail: the channel, the prefix with
+    its count, the period, each SKU's daily price → channel price, stock and what the main product can spare, the
+    warnings (a colour without stock, the CLI's own), what an approval does; at most 40 (what the bot keeps), the
+    SKUs cut short first."""
+    goods = data.get("channelGoods") if isinstance(data, dict) and isinstance(data.get("channelGoods"), dict) else {}
+    head = [_fact("渠道类型", "专属达人带货：只绑这一位达人，库存不共享" if action.get("exclusive", True)
+                  else "达人带货：" + ("库存单独分" if action.get("stock_per_sku") else "共用主商品库存"))]
+    prefix = action.get("title_prefix")
+    if prefix:
+        title = goods.get("title") if isinstance(goods.get("title"), dict) else {}
+        counted = title.get("prefixCounted") if _is_int(title.get("prefixCounted")) else title_length(prefix)
+        most = f"/{title['prefixMax']}" if _is_int(title.get("prefixMax")) else ""      # (the product's own limit)
+        head.append(_fact("标题前缀", f"{prefix}（{counted}{most} 个字符，汉字算 2 个）"))
+    head.append(_fact("有效期", "长期有效"))
+    stocks = [s["stock"] for s in skus if s.get("stock") is not None]
+    head.append(_fact("SKU", f"{len(skus)} 个；渠道价按" + ("动作里写的价" if action.get("price") else "日常价 9 折取整到元")
+                      + (f"；库存一共 {sum(stocks)} 件（每个颜色最多 {_wants_stock(action)} 件，可分的不够就全分）" if stocks
+                         else "；库存共用主商品")))
+    head += [_fact("提醒", line) for line in warnings]
+    for text in goods.get("warnings") or []:
+        fact = _fact("页面提示", text)
+        if fact not in head:
+            head.append(fact)
+    tail = [_fact("批准以后", f"先再查一次她是不是已经绑在这个商品的渠道品上、按这份约定再预览一次（绑了或者日常价变了就不建），"
+                            f"再建渠道品；建好、读回核验通过、拿到推广链接以后，预览并绑定达人 UID {action['creator_platform_id']}；"
+                            "两步都核验通过才把推广链接发给达人")]
+    room = max(0, 40 - len(head) - len(tail) - 1)
+    rows = []
+    for s in skus[:room]:
+        stock = ("共用主商品" if s.get("stock") is None else f"{s['stock']} 件"
+                 + (f"（主商品可分 {s['assignable']} 件）" if s.get("assignable") is not None else ""))
+        rows.append(_fact(f"SKU {s['id']}" + (f" {s['name']}" if s.get("name") else ""),
+                          (f"日常价 {s['main_price']} 元 → " if s.get("main_price") else "") + f"渠道价 {s['price']} 元；库存 {stock}"))
+    if len(skus) > room:
+        rows.append(_fact("SKU", f"还有 {len(skus) - room} 个没列出来：看预览明细"))
+    return (head + rows + tail)[:40]
+
+
 def _preview_dy_designated(action: dict, cfg: dict, run_one, block: dict, context: Optional[dict] = None) -> None:
     cover = _invite_check(action, context, block)
     if cover is not None:                       # the invite card opened it: nothing to ask the platform
@@ -1441,11 +2080,32 @@ def _preview_dy_designated(action: dict, cfg: dict, run_one, block: dict, contex
 
 
 def _preview_dy_channel_goods(action: dict, cfg: dict, run_one, block: dict) -> None:
-    rec, _ = _dy_preview(cfg, "create", action, run_one)
-    block["steps"].append(rec)
+    """Read the main product, work out the agreement the shop's way, preview the create with it (see above)."""
     block["run"] = {"steps": ["create", "bind"]}
-    block["facts"].append(_fact("批准以后", f"先建渠道品；建好且读回核验通过以后，预览并绑定达人 UID {action['creator_platform_id']}；"
-                                          "两步都核验通过才把渠道品的推广链接发给达人"))
+    bound, _ = _dy_bound(cfg, action, run_one)
+    block["steps"].append(bound)
+    if bound["verdict"] != "ready":
+        return
+    read, data = _dy_read(cfg, action, run_one)
+    block["steps"].append(read)
+    if read["verdict"] != "ready":
+        return
+    goods = data.get("channelGoods") if isinstance(data, dict) and isinstance(data.get("channelGoods"), dict) else {}
+    skus, warnings, problems = channel_skus(goods.get("skus"), action)
+    if problems:
+        read["verdict"] = "blocked"
+        read["problems"].extend(problems)
+        return
+    rec, again = _dy_preview(cfg, "create", action, run_one, agreement=channel_agreement(action, skus))
+    block["steps"].append(rec)
+    if rec["verdict"] == "ready":
+        mismatch = _channel_mismatch(skus, again)
+        if mismatch:
+            rec["verdict"] = "error"
+            rec["problems"].extend(mismatch)
+    block["run"] = {"steps": ["create", "bind"],
+                    "skus": [{k: s[k] for k in ("id", "price", "stock", "main_price")} for s in skus]}
+    block["facts"].extend(_channel_facts(action, skus, warnings, again))
 
 
 def _preview_dy_invite(action: dict, cfg: dict, run_one, block: dict) -> None:
@@ -1470,8 +2130,11 @@ def _preview_dy_invite(action: dict, cfg: dict, run_one, block: dict) -> None:
 
 
 def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict, context: Optional[dict] = None) -> None:
-    def write(step: str, channel_id: str = "", expect: Optional[dict] = None) -> tuple:
-        run = run_one(_dy_argv(cfg, step, action, execute=True, channel_id=channel_id, expect=expect), "dy", True)
+    def write(step: str, channel_id: str = "", expect: Optional[dict] = None, agreement: Optional[dict] = None) -> tuple:
+        if agreement is not None:
+            run = _dy_agreement_run(cfg, agreement, run_one, execute=True)
+        else:
+            run = run_one(_dy_argv(cfg, step, action, execute=True, channel_id=channel_id, expect=expect), "dy", True)
         data = parse_json(run.stdout)
         rec = _step(step, DY_STEPS[step][0], run, True)
         rec["outcome"] = _execute_outcome(run, data, _rows(data), rec)
@@ -1479,8 +2142,8 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict, cont
         record["created"].update(_dy_created(data))
         return rec["outcome"], data
 
-    def look(step: str, channel_id: str = "") -> tuple:
-        rec, data = _dy_preview(cfg, step, action, run_one, channel_id=channel_id)
+    def look(step: str, channel_id: str = "", agreement: Optional[dict] = None) -> tuple:
+        rec, data = _dy_preview(cfg, step, action, run_one, channel_id=channel_id, agreement=agreement)
         record["steps"].append(rec)
         return rec, data
 
@@ -1509,21 +2172,62 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict, cont
                 return
         write("designated")
         return
-    # dy.channel_goods: the channel product, then its talent
-    outcome, data = write("create")
+    # dy.channel_goods: the agreement the approval holds, previewed once more right before the write (anything that
+    # stops it, or a daily price that moved since: NOT_RUN, nothing written); the channel product; its talent
+    bound, rows = _dy_bound(cfg, action, run_one)
+    record["steps"].append(bound)
+    if bound["verdict"] != "ready":
+        bound["outcome"] = "NOT_RUN"
+        record["problems"].append("没有执行：" + ("查不到她绑没绑" if bound["verdict"] == "error" else "；".join(bound["problems"][:2]))
+                                  + "，平台没有动")
+        return
+    # what an earlier approval made and did not bind (the bot's record of it): still there, no second one
+    leftover = (context or {}).get("leftover")
+    leftover = [str(c) for c in leftover if _DIGITS.match(str(c))][:5] if isinstance(leftover, list) else []
+    if leftover:
+        rec, still = _dy_leftover(cfg, action, run_one, leftover)
+        record["steps"].append(rec)
+        if still is None or still:
+            rec["outcome"] = "NOT_RUN"
+            record["problems"].append(f"没有执行：{rec['problems'][-1]}，平台没有动")
+            return
+    agreement = channel_agreement(action, plan["skus"])
+    again, data = look("create", agreement=agreement)
+    changed = _channel_mismatch(plan["skus"], data) if again["verdict"] == "ready" else []
+    if again["verdict"] != "ready" or changed:
+        again["outcome"] = "NOT_RUN"
+        again["problems"].extend(changed)
+        why = "；".join(changed or again["problems"]) or VERDICTS.get(again["verdict"], again["verdict"])
+        record["problems"].append(f"没有执行：建渠道品之前按批准的约定再预览了一次，{'情况变了' if changed else '没通过'}"
+                                  f"（{_clip(why, 300)}），平台没有动")
+        return
+    outcome, data = write("create", agreement=agreement)
     if outcome not in _DONE:
         return
+    # the channel product and its link stay in the record whatever comes next: the bot names them in the way back
+    # (bind her by hand and send the link, or take it down), and hands the id to the next approval (review F3)
     link = _dy_link(data, action["item_id"])
+    if link:
+        record["created"]["link"] = link
     channel_id = record["created"].get("channel_id", "")
+    # the CLI read the product once more inside its own run: a daily price that moved between the preview just made
+    # and that read went into the result, and the approved 9 折 is not the 9 折 any more (review 2026-11-09 #9)
+    moved = _channel_mismatch(plan["skus"], data, prices=False)
+    if moved:
+        record["problems"].append(f"渠道品{' ' + channel_id if channel_id else ''}建好了，可是建的时候主商品的日常价和批准时"
+                                  "不一样了（" + "；".join(moved[:3]) + "）：渠道价还是批准时的，没有绑定达人、没有发链接；"
+                                  "请到抖店「渠道商品管理」核对渠道价")
+        record["incomplete"] = True
+        return
     if not channel_id:
         record["problems"].append("渠道品建好了，但结果里没有渠道品 ID，没法绑定达人")
         record["incomplete"] = True
         return
     if not link:
-        record["problems"].append("渠道品建好了，但结果里没有能发的推广链接（channelGoods.links.channelLink）")
+        record["problems"].append(f"渠道品 {channel_id} 建好了，但结果里没有能发的推广链接（channelGoods.links.channelLink），"
+                                  "没有绑定达人")
         record["incomplete"] = True
         return
-    record["created"]["link"] = link
     bind, data = look("bind", channel_id)
     rows = _rows(data)
     if rows and all(r.get("outcome") == "NO_CHANGE_NEEDED" for r in rows):
@@ -1824,6 +2528,12 @@ def preview(raw, cfg: dict, *, catalog: Optional[dict], heartbeat=None, context:
     if verdict == "ready" and tuple(block["run"].get("steps") or ()) not in PLANS[name]:
         verdict = "error"
         block["problems"].append("预览没有给出执行步骤")
+    elif verdict == "ready":
+        try:                                     # what the bot holds an approval to (check_block): a draft is never lost to it
+            check_plan(action, block["run"])
+        except ActionError as e:
+            verdict = "error"
+            block["problems"].append(f"预览给出的执行步骤不对：{e}")
     block["verdict"] = verdict
     block["problems"] = block["problems"][:20]
     return block
@@ -1848,6 +2558,8 @@ def check_plan(action: dict, plan) -> dict:
             if not _is_int(value) or not (low <= value <= high):
                 raise _err("bad_plan", "邀约带货的批准里没有预览时达人的状态和门槛")
             out[key] = value
+    elif action["action"] == "dy.channel_goods":
+        out.update(_channel_plan(action, plan))         # the agreement: each SKU's price and stock, the shop's way
     return out
 
 
@@ -2090,7 +2802,8 @@ def _steps(value) -> list:
 def check_block(block) -> dict:
     """The Mac's preview of an action (a draft's ``platform``), checked and cut to size.
     ``ActionError`` when it is not one; ``ActionRefused`` (its ``code`` the check's) when its
-    action does not pass ``check_action`` (the form, ``FORM_LIMITS``)."""
+    action does not pass ``check_action`` (the form, ``FORM_LIMITS``), or a ready 专属链接 carries no agreement
+    (``old_worker``: a Mac worker from before 2026-11-09 previews without one; the reply stays, the action goes)."""
     if not isinstance(block, dict) or block.get("verdict") not in VERDICTS:
         raise _err("bad_block", "平台预览的格式不对")
     action = None
@@ -2104,7 +2817,11 @@ def check_block(block) -> dict:
         raise _err("bad_block", "预览说可以执行，却没有动作")
     plan = {}
     if verdict == "ready":
-        plan = check_plan(action, block.get("run"))
+        run = block.get("run")
+        if action["action"] == "dy.channel_goods" and not (isinstance(run, dict) and run.get("skus")):
+            raise ActionRefused("old_worker", "Mac 的 worker 比机器人旧：专属链接的预览里没有约定（每个 SKU 的渠道价和库存），"
+                                              "更新 Mac 以后再起草")
+        plan = check_plan(action, run)
     catalog = block.get("catalog") if isinstance(block.get("catalog"), dict) else {}
     synced = catalog.get("synced_at")
     covered = covered_of(block.get("covered"), action) if verdict == "blocked" and action else None
@@ -3079,6 +3796,7 @@ MAX_MINE_ORDERS = 100       # of ours one answer gives at most
 SAMPLE_PLATFORMS = ("DY", "XHS", "KS", "WXSPH")               # 聚水潭's platforms of a creator
 SAMPLE_NICK_CHARS = 40      # a creator's nickname as the bot keeps it
 MAX_SAMPLE_SHIPS = 5        # waybills kept of one order
+SAMPLE_PACKAGES_MAX = 50    # packages (ERP orders) of one order counted at most (an order has 50 SKUs at most)
 SAMPLE_REASON_CHARS = 200
 _WAYBILL = re.compile(r"^[A-Za-z0-9-]{6,30}$")              # a waybill as deals.py takes one
 _SAMPLE_STATUS = re.compile(r"^[A-Z][A-Z_]{0,29}$")
@@ -3131,30 +3849,56 @@ def _carrier(value) -> str:
 
 def sample_info(row) -> Optional[dict]:
     """What the bot needs of one row of `jst samples` (the CLI's projectSample): ``{"order_no", "status", "ships":
-    [{"carrier", "waybill", "sent_at"}], "sent_at", "signed_at", "reason"}``, the waybills that look like one, each
-    once, the earliest sent first; None for a row without an order number.  The creator, the products and the shop
-    of the row are left out."""
+    [{"carrier", "waybill", "sent_at"}], "packages", "unshipped", "sent_at", "signed_at", "reason"}``, the waybills
+    that look like one, each once, the earliest sent first; ``packages``: how many ERP orders (packages) the order
+    went to the warehouse as, ``unshipped``: how many of them have no waybill yet (2026-11-06: the warehouse sends
+    what is in stock first, the shipping notice waits for every package: ``sample_split``); None for a row without
+    an order number.  The creator, the products and the shop of the row are left out."""
     if not isinstance(row, dict):
         return None
     number = str(row.get("orderNo") or "").strip()
     if not _ORDER_NO.match(number):
         return None
     status = str(row.get("status") or "").strip().upper()
-    ships, seen = [], set()
+    ships, seen, packages, unshipped = [], set(), 0, 0
     for erp in row.get("erpOrders") if isinstance(row.get("erpOrders"), list) else []:
         if not isinstance(erp, dict):
             continue
+        packages += 1
         waybill = str(erp.get("logisticsNo") or "").strip()
-        if not _WAYBILL.match(waybill) or waybill in seen:
+        if not _WAYBILL.match(waybill):
+            unshipped += 1
+            continue
+        if waybill in seen:
             continue
         seen.add(waybill)
         ships.append({"carrier": _carrier(erp.get("logisticsCompany")), "waybill": waybill,
                       "sent_at": jst_time(erp.get("sendTime"))})
     ships.sort(key=lambda s: (s["sent_at"] is None, s["sent_at"] or 0))
     return {"order_no": number, "status": status if _SAMPLE_STATUS.match(status) else "",
-            "ships": ships[:MAX_SAMPLE_SHIPS], "sent_at": jst_time(row.get("sendTime")),
+            "ships": ships[:MAX_SAMPLE_SHIPS], "packages": min(packages, SAMPLE_PACKAGES_MAX),
+            "unshipped": min(unshipped, SAMPLE_PACKAGES_MAX), "sent_at": jst_time(row.get("sendTime")),
             "signed_at": jst_time(row.get("signTime")),
             "reason": _clip(row.get("rejectReason") or "", SAMPLE_REASON_CHARS)}
+
+
+def sample_split(info) -> Optional[tuple]:
+    """``(out, of)`` when only part of a sample order went out: the warehouse sent it as ``of`` packages (ERP orders)
+    and ``out`` of them have a waybill, the others none yet (``check_sample_result``'s ``packages`` /
+    ``unshipped``); None when it is whole: every package has a waybill, none has, 聚水潭 says it is signed for (or
+    deleted), or an old worker's answer says nothing of packages.  The creator's shipping notice waits for every
+    package (2026-11-06, the user: 「等发货单全了再说」)."""
+    if not isinstance(info, dict) or not info.get("ships") or info.get("status") in ("SIGNED", "DELETED"):
+        return None
+    packages, unshipped = info.get("packages"), info.get("unshipped")
+    if not (_is_count(packages) and _is_count(unshipped) and 0 < unshipped < packages):
+        return None
+    return packages - unshipped, packages
+
+
+def _is_count(value) -> bool:
+    """A number of packages as an answer may give one (``SAMPLE_PACKAGES_MAX`` at most)."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= SAMPLE_PACKAGES_MAX
 
 
 def samples_argv(cfg: dict, order_nos: list) -> list:
@@ -3303,7 +4047,9 @@ def sample_statuses(cfg: dict, order_nos, *, heartbeat=None, sleep: Optional[Cal
 def check_sample_result(value, asked=None) -> dict:
     """The Mac's answer to a sample-status job, checked and cut to what the bot uses (``ActionError`` when it is
     none): only order numbers it asked about (``asked``), statuses as words, waybills as deals.py takes them, each
-    once, times as numbers, reasons short; ``stopped`` with a known verdict (else ``error``)."""
+    once, times as numbers, reasons short, ``packages`` / ``unshipped`` as counts (None both, from an old worker or
+    when they make no sense: the order is taken whole, ``sample_split``); ``stopped`` with a known verdict (else
+    ``error``)."""
     if not isinstance(value, dict) or value.get("op") != "sample_status":
         raise _err("bad_result", "寄样单状态的结果格式不对")
     wanted = None if asked is None else {str(n) for n in asked}
@@ -3323,7 +4069,11 @@ def check_sample_result(value, asked=None) -> dict:
             if not _WAYBILL.match(waybill) or any(s["waybill"] == waybill for s in ships):
                 continue
             ships.append({"carrier": _carrier(ship.get("carrier")), "waybill": waybill, "sent_at": when(ship.get("sent_at"))})
+        packages, unshipped = info.get("packages"), info.get("unshipped")
+        if not (_is_count(packages) and _is_count(unshipped) and unshipped <= packages):
+            packages = unshipped = None                # an old worker (or nonsense): the order is taken whole
         return {"status": status if _SAMPLE_STATUS.match(status) else "", "ships": ships[:MAX_SAMPLE_SHIPS],
+                "packages": packages, "unshipped": unshipped,
                 "sent_at": when(info.get("sent_at")), "signed_at": when(info.get("signed_at")),
                 "reason": _clip(info.get("reason") or "", SAMPLE_REASON_CHARS)}
 

@@ -247,13 +247,116 @@ def test_a_huopan_is_asked_for_from_the_running_console_and_refused_while_stoppe
     assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能补发货盘"}
 
 
+def raw_call(path, method="GET", headers=None):
+    """A request whose answer need not be JSON: ``(status, its headers by lower-case name, body bytes)``."""
+    _, sock = _build_handler(path, method=method, headers=headers)
+    head, body = b"".join(sock._sent_chunks).split(b"\r\n\r\n", 1)
+    lines = head.decode("latin-1").split("\r\n")
+    named = {ln.split(":", 1)[0].strip().lower(): ln.split(":", 1)[1].strip() for ln in lines[1:] if ":" in ln}
+    return int(lines[0].split()[1]), named, body
+
+
+def test_handcards_are_asked_for_shown_as_pictures_and_refused_while_stopped(running, tmp_path, monkeypatch):
+    """直播手卡 (PRM_HANDCARDS, 2026-11-09): POST /api/prm/deals {action: handcards, items} makes a job with
+    ``meta.handcards``; its draft comes back with two cards: /api/prm tags it (``handcards``: ok, count, note, the
+    cuts, the 双11 line's end date, ``expired``) and GET /api/prm/file?packet=&kind=attachment&n= streams each card as
+    a picture (``no-store``; review 2026-11-09 item 11, the contract shared with the operator-only files, ``kind=
+    operator``); a file that is no picture, an index past the files, no such draft, a kind it does not serve or none,
+    a number that is no whole number of ASCII digits (「١」 is one to int()): 404 (JSON with its length and the CORS
+    echo); another site's page (an <img>
+    pointed here): 403; a POST: 405.  The switch shows as ``handcards`` (running: the service's; stopped: .env's); a
+    stopped bot still shows a draft's cards (its database closed again after) but cannot ask the Mac."""
+    import io
+    import sqlite3
+    from src.prm import handcards as hc
+
+    running.prm._handcards = True                                  # (PRM_HANDCARDS=on)
+    d = call("/api/prm")[1]
+    assert d["handcards"] is True and d["parties"][0]["deal"]["card_items"] is None
+    [waiting] = d["pending"]
+    assert waiting["handcards"] is None
+    assert call("/api/prm/packets", "POST", {"id": waiting["id"], "action": "drop"})[1]["ok"] is True
+    deal_id = d["parties"][0]["deal"]["id"]
+    assert call("/api/prm/deals", "POST", {"action": "handcards", "deal_id": deal_id, "items": ["x1"]})[1] == {
+        "ok": False, "error": "「x1」不是抖店的商品 ID（一串数字）"}
+    answer = call("/api/prm/deals", "POST", {"action": "handcards", "deal_id": deal_id,
+                                             "items": ["3000000000000000901"]})[1]
+    assert answer["ok"] is True
+    running.relay._clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    assert job["meta"]["handcards"] == {"by": "console", "items": [{"item_id": "3000000000000000901", "sku_ids": []}]}
+    files = [("手卡_01_测试帽.png", b"\x89PNG card one"), ("手卡_02_测试帽二.png", b"\x89PNG card two"),
+             ("说明.txt", b"text")]
+    for name, body in files:
+        assert running.relay.outfile(job["id"], name, io.BytesIO(body).read, len(body))
+    made = hc.made_block(True, cards=[n for n, _ in files[:2]], note="做了 2 张手卡")
+    draft = {"intent": "做手卡", "slots": {}, "stage_proposal": "", "message_kind": "material",
+             "reply_draft": "老师，手卡整理好啦～", "attachments_to_send": [n for n, _ in files],
+             "attachments_named": [n for n, _ in files], "needs_attention": False, "reason": "kb", "handcards_made": made}
+    running.relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False)})
+    running.relay.tick()
+    [card] = call("/api/prm")[1]["pending"]
+    assert card["handcards"] == {"ok": True, "count": 2, "note": "做了 2 张手卡", "problems": [], "cuts": [],
+                                 "promo_until": "", "catalog_at": None, "console": True, "expired": False}
+    assert [a["name"] for a in card["attachments"]] == [n for n, _ in files]
+    url = f"/api/prm/file?packet={card['id']}&kind=attachment&n="
+    page = {"Origin": "http://localhost:5173", "Sec-Fetch-Site": "same-site"}
+    status, head, body = raw_call(url + "1", headers=page)
+    assert (status, head["content-type"], body) == (200, "image/png", files[1][1])
+    assert head["cache-control"] == "no-store" and head["content-length"] == str(len(body))
+    assert head["access-control-allow-origin"] == "http://localhost:5173"
+    for path in (url + "2", url + "3", url + "-1", url + "1.0", url, f"/api/prm/file?packet={card['id']}&n=1",
+                 url + "%D9%A1", url + "%C2%B2", url + "1" * 13,         # (١ and ² are no ASCII digits; 13 is too many)
+                 f"/api/prm/file?packet={card['id']}&kind=operator&n=0", f"/api/prm/file?packet={card['id']}&kind=&n=0",
+                 "/api/prm/file?packet=999&kind=attachment&n=0", "/api/prm/file?packet=x&kind=attachment&n=0",
+                 "/api/prm/file?packet=&kind=attachment&n=0", "/api/prm/file"):
+        status, head, body = raw_call(path, headers=page)
+        assert (status, json.loads(body)) == (404, {"ok": False, "error": "没有这张图"}), path
+        assert head["content-length"] == str(len(body)) and head["access-control-allow-origin"] == page["Origin"]
+    status, head, body = raw_call(url + "1", headers={"Sec-Fetch-Site": "cross-site"})
+    assert status == 403 and json.loads(body)["ok"] is False and head["content-length"] == str(len(body))
+    assert raw_call(url + "1", headers={"Origin": "https://evil.example"})[0] == 403      # (every request's check)
+    assert raw_call(url + "1", method="POST")[0] == 405
+    server.register_prm(None)                                       # the bot stopped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_HANDCARDS", "on")
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    assert call("/api/prm")[1]["handcards"] is True
+    stopped = call("/api/prm/deals", "POST", {"action": "handcards", "deal_id": 1})[1]
+    assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能做手卡"}
+    # (only from inside the relay's folder a stopped bot finds next to CLAUDE_RELAY_DB: review 2026-11-10)
+    monkeypatch.delenv("CLAUDE_RELAY_DB", raising=False)
+    picture = tmp_path / "data" / "claude_relay_files" / "outfiles" / "job-1" / "手卡_01_测试帽.png"
+    picture.parent.mkdir(parents=True)
+    picture.write_bytes(b"\x89PNG kept")
+    outside = tmp_path / "手卡_02_测试帽.png"
+    outside.write_bytes(b"\x89PNG outside")
+    store = PrmStore(server._prm_db_path())
+    party = store.party_by_wxid(CREATOR)
+    kept = store.add_packet(deal_id=store.deal_of(party["id"])["id"], party_id=party["id"], job_id=None,
+                            chat_id=CREATOR, kind="material", text="老师，手卡整理好啦～", intent="", slots={},
+                            attachments=[{"name": picture.name, "path": str(picture), "size": 11, "sha256": ""},
+                                         {"name": outside.name, "path": str(outside), "size": 14, "sha256": ""}],
+                            stage_proposal="", needs_attention=False, reason="", now=time.time())
+    store.close()
+    opened, real = [], server._prm_stopped_store
+    monkeypatch.setattr(server, "_prm_stopped_store", lambda: opened.append(real()) or opened[-1])
+    assert raw_call(f"/api/prm/file?packet={kept}&kind=attachment&n=0")[::2] == (200, b"\x89PNG kept")
+    assert raw_call(f"/api/prm/file?packet={kept}&kind=attachment&n=1")[0] == 404      # (outside the relay's folder)
+    assert raw_call(f"/api/prm/file?packet={kept}&kind=attachment&n=2")[0] == 404 and len(opened) == 3
+    for used in opened:                                             # (closed again after each request)
+        with pytest.raises(sqlite3.ProgrammingError):
+            used._conn.execute("SELECT 1")
+
+
 def test_the_draft_note_is_kept_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
     """POST /api/prm/deals {action: draft_note, text} (起草备注, 2026-10-31): the operators' words for the Mac, kept on the
-    deal (whitespace collapsed) and shown in GET /api/prm's deal; her next draft job carries them (``meta.note``); too
+    deal (each line's blanks collapsed, the lines kept) and shown in GET /api/prm's deal; her next draft job carries them (``meta.note``); too
     long is refused, empty clears it; another site's page cannot change it; a stopped bot cannot keep one (refused like
     写开场白)."""
     words = "直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音"
-    kept = "直接发链接和brief，感兴趣的会回复！ 勿催视频，不接语音"
+    kept = "直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音"
     deal = call("/api/prm")[1]["parties"][0]["deal"]
     assert deal["draft_note"] == ""
     answer = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": deal["id"], "text": words})[1]
@@ -307,11 +410,12 @@ def _platform_draft(running):
     from src.prm import platforms
 
     action = platforms.check_action({"action": "dy.channel_goods", "item_id": "3000000000000000101",
-                                     "creator_platform_id": "5100000000000002", "price": "15"})
+                                     "creator_platform_id": "5100000000000002", "title_prefix": "【小美专属】"})
     preview = {"version": 1, "action": action, "verdict": "ready", "problems": [], "steps": [],
-               "facts": [{"label": "将写入", "value": "create a 达人带货 channel product"}],
-               "run": {"steps": ["create", "bind"]}, "catalog": {"synced_at": 1.0, "title": "测试主品"},
-               "previewed_at": 2.0}
+               "facts": [{"label": "将写入", "value": "create a 专属达人带货 channel product"}],
+               "run": {"steps": ["create", "bind"], "skus": [{"id": "3100000000000000201", "price": "17.00", "stock": 40,
+                                                              "main_price": "19.99"}]},
+               "catalog": {"synced_at": 1.0, "title": "测试主品"}, "previewed_at": 2.0}
     running.prm.handle({"chat_id": CREATOR, "sender_id": CREATOR, "content": "好的，就要专属链接", "msg_type": 1,
                         "is_group": False, "timestamp": running.relay._clock()})
     running.relay._clock.now += SETTLE_SEC + 1
@@ -1004,6 +1108,41 @@ def test_boss_groups_from_the_running_console_and_while_stopped(tmp_path, monkey
     monkeypatch.delenv("PRM_BOSS_CALL")
     assert call("/api/prm")[1]["boss_groups"] == {"enabled": False, "why_not": "", "warning": "", "boss": [BOSS],
                                                    "boss_call": "老板", "pending": [], "waiting": 0, "linked": 0}
+
+
+def test_whose_lines_are_drafted_and_our_peoples_names_running_and_stopped(tmp_path, monkeypatch):
+    """2026-11-11: GET /api/prm's ``boss_groups`` says whether her side's lines are drafted (``her_side`` and ``max``:
+    PRM_GROUP_HER_SIDE, PRM_BOSS_GROUP_MAX as the bot clamps it) and our own people's names (``ours``, PRM_GROUP_OURS),
+    each only when set, from the running bot and from .env while it is stopped (no warning then: nothing is read)."""
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_group_her_side="on", prm_boss_group_max=8,
+                          prm_group_ours="测试同事")
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    server.register_prm(prm)
+    try:
+        shown = call("/api/prm")[1]["boss_groups"]
+        assert (shown["her_side"], shown["max"], shown["ours"]) == (True, 8, ["测试同事"])
+        assert "还没认出来" in shown["ours_warning"]
+    finally:
+        server.register_prm(None)
+        relay.stop()
+    monkeypatch.chdir(tmp_path)                                    # the bot stopped
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_COPILOT", "on")
+    monkeypatch.setenv("PRM_GROUP_HER_SIDE", "on")
+    monkeypatch.setenv("PRM_BOSS_GROUP_MAX", "30")
+    monkeypatch.setenv("PRM_GROUP_OURS", "测试同事、测试运营")
+    shown = call("/api/prm")[1]["boss_groups"]
+    assert (shown["her_side"], shown["max"], shown["ours"]) == (True, 20, ["测试同事", "测试运营"])
+    assert "ours_warning" not in shown
+    monkeypatch.setenv("PRM_GROUP_HER_SIDE", "off")
+    monkeypatch.delenv("PRM_GROUP_OURS")
+    shown = call("/api/prm")[1]["boss_groups"]
+    assert not {"her_side", "max", "ours", "ours_warning"} & set(shown)
 
 
 def test_the_console_warns_of_an_unknown_boss_name_and_still_lets_a_person_pick(tmp_path):

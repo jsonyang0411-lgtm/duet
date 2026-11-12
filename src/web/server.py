@@ -11,6 +11,7 @@ import logging
 import os
 _os = os
 import re
+import shutil
 import threading
 import time
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -1104,10 +1105,12 @@ def _prm_state_core() -> dict:
                "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), "night": _prm_night_env(auto["on"]),
                "auto_register": _prm_env_on("PRM_AUTO_REGISTER"), "auto_mode": auto,
                "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0),
-               "opening_auto_min": _prm_int_env("PRM_OPENING_AUTO_MIN", 0), **settings}
+               "opening_auto_min": _prm_int_env("PRM_OPENING_AUTO_MIN", 0),
+               "handcards": _prm_env_on("PRM_HANDCARDS"), "draft_context": _prm_env_on("PRM_DRAFT_CONTEXT"), **settings}
     stopped["friend_add_status"] = _friend_add_stopped_status(store)
     stopped["three_party"] = _three_party_stopped_status()
     stopped["boss_groups"] = _boss_groups_stopped_status(store)
+    stopped["wechat_review"] = _wechat_review_stopped_status(store)
     if store is None:
         from src.prm.platforms import ACTIONS
         from src.prm.result import MESSAGE_KINDS
@@ -1120,6 +1123,19 @@ def _prm_state_core() -> dict:
         return prm_snapshot(store, running=False, retention_days=stopped["retention_days"], extra=stopped)
     finally:
         store.close()
+
+
+def _wechat_review_stopped_status(store=None) -> dict:
+    """微信里审批草稿 while the bot is stopped (src/prm/wechat_review.py ``WechatReview.status``, from .env): the switch, and
+    why nothing goes to the admin's chat now: ADMIN_WXID empty, a group's id, a registered creator's wxid (in ``store``,
+    the stopped bot's database; ``wechat_review.admin_problem``, as the running bot says it), else that the bot does not
+    run."""
+    from src.prm.wechat_review import admin_problem
+
+    if not _prm_env_on("PRM_WECHAT_REVIEW"):
+        return {"on": False}
+    why = admin_problem(os.getenv("ADMIN_WXID", ""), store) or "机器人没有运行：草稿发不到管理员微信里"
+    return {"on": True, "why": why, "open": 0, "unsent": 0, "unsure": 0, "older": 0}
 
 
 def _three_party_stopped_status() -> dict:
@@ -1136,13 +1152,21 @@ def _three_party_stopped_status() -> dict:
 def _boss_groups_stopped_status(store) -> dict:
     """老板拉的群 while the bot is stopped (src/prm/boss_groups.py ``boss_groups_out``): the switch and the bosses as .env
     says, the groups from the database (``store`` None: none yet); nothing is found or taken over now."""
-    from src.prm.boss_groups import boss_call, boss_groups_out
+    from src.prm.boss_groups import MAX_DEFAULT, MAX_HIGH, MAX_LOW, boss_call, boss_groups_out, group_ours
     from src.prm.three_party import group_with
 
     on = _prm_env_on("PRM_BOSS_GROUPS")
+    try:                                   # (PRM_BOSS_GROUP_MAX as the running bot clamps it)
+        most = min(max(int(os.getenv("PRM_BOSS_GROUP_MAX", "") or MAX_DEFAULT), MAX_LOW), MAX_HIGH)
+    except ValueError:
+        most = MAX_DEFAULT
+    # (2026-11-11: our own people's names, PRM_GROUP_OURS, and whether her side's lines are drafted, PRM_GROUP_HER_SIDE:
+    # the console's hints say whose lines are drafted while the bot is stopped too; names are not read now: no warning)
     return boss_groups_out(store, enabled=on, why_not="机器人没有运行" if on else "",
                            boss=group_with(os.getenv("PRM_GROUP_WITH", "")), reserved=_prm_reserved(),
-                           boss_call=boss_call(os.getenv("PRM_BOSS_CALL", "")))
+                           boss_call=boss_call(os.getenv("PRM_BOSS_CALL", "")),
+                           ours=group_ours(os.getenv("PRM_GROUP_OURS", "")),
+                           her_side=_prm_env_on("PRM_GROUP_HER_SIDE"), group_max=most)
 
 
 def _prm_boss_groups(data: dict, action: str) -> dict:
@@ -1190,9 +1214,11 @@ def _prm_friend_adds(data: dict) -> dict:
 
 def _prm_deal(data: dict) -> dict:
     """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done | opening | huopan |
-    group | group_try | group_made | group_none | draft_note, deal_id, ...} (``huopan``: 「补发货盘」; ``group*``: 三方群,
-    src/prm/three_party.py; ``draft_note`` {text}: the deal's 起草备注; ``opening``, ``huopan``, ``group*`` and
-    ``draft_note`` only while running: a stopped bot refuses them, ``apply_deal_action``)."""
+    handcards | group | group_try | group_made | group_none | draft_note | photo_confirm | photo_unconfirm, deal_id,
+    ...} (``huopan``: 「补发货盘」; ``handcards`` {items?}: 「做手卡」, src/prm/handcards.py; ``group*``: 三方群,
+    src/prm/three_party.py; ``draft_note`` {text}: the deal's 起草备注; ``photo_confirm`` {packet, code} /
+    ``photo_unconfirm`` {code}: PRM_DRAFT_CONTEXT's 「对过图了」 and its 「撤销」; ``opening``, ``huopan``, ``handcards``,
+    ``group*``, ``draft_note`` and ``photo_*`` only while running: a stopped bot refuses them, ``apply_deal_action``)."""
     from src.prm.service import apply_deal_action
 
     action = str(data.get("action") or "")
@@ -1206,6 +1232,56 @@ def _prm_deal(data: dict) -> dict:
                                  takeover_sec=_prm_int_env("PRM_TAKEOVER_MIN", 120) * 60)
     finally:
         store.close()
+
+
+# GET /api/prm/file's ``kind``: which of a draft's file lists (「待审批」 shows a draft's pictures before anyone sends
+# them): ``attachment``, what goes to her (``packet.attachments``: the 直播手卡); ``operator``, the operators' only
+# (``meta.operator_files``: PRM_DRAFT_CONTEXT's photo sheet, only a file the relay keeps for a job)
+_PRM_FILE_KINDS = ("attachment", "operator")
+_ASCII_NUMBER = re.compile(r"[0-9]{1,12}")
+
+
+def _prm_file(query: str):
+    """GET /api/prm/file?packet=<id>&kind=attachment|operator&n=<index>: one picture of a draft as ``(path, content
+    type)``: ``kind`` attachment, ``attachments[n]`` (what goes to her: the 直播手卡); operator, ``meta.operator_files[n]``
+    (PRM_DRAFT_CONTEXT's photo sheet, only from the relay's ``outfiles/job-*``); which file and whether it is a picture
+    still there, inside the relay's folder (``files_root`` / ``_relay_files_root``): src/prm/draft_context.py
+    ``picture``.  None for anything else (``packet``, ``kind`` or ``n`` missing or not a whole number of ASCII digits / a
+    known kind, no such draft or file, not a picture, gone from disk, outside the relay's folder).  Read only,
+    also while the bot is stopped (that store is closed again); the path is the one the bot itself kept for the file the
+    Mac sent back."""
+    from urllib.parse import parse_qs
+
+    from src.prm.draft_context import picture
+
+    q = parse_qs(query)
+    kind = (q.get("kind") or [""])[0]
+    raw_packet, raw_n = (q.get("packet") or [""])[0], (q.get("n") or [""])[0]
+    if kind not in _PRM_FILE_KINDS or not _ASCII_NUMBER.fullmatch(raw_packet) or not _ASCII_NUMBER.fullmatch(raw_n):
+        return None                                       # (str.isdigit would take 「²」 and 「١」)
+    running = _prm                                        # read once: the bot may start or stop meanwhile
+    store = running.store if running is not None else _prm_stopped_store()
+    if store is None:
+        return None
+    try:
+        packet = store.packet(int(raw_packet))
+    finally:
+        if running is None:
+            store.close()
+    # only a file inside the relay's folder, of either kind (review 2026-11-10: as the WeChat notification's pictures)
+    root = getattr(running, "files_root", None) if running is not None else _relay_files_root()
+    return picture(packet, kind, int(raw_n), root)
+
+
+def _relay_files_root():
+    """The relay's folder of files while the bot is stopped (``ClaudeRelay.files_dir``: the running one's when there is
+    one, else its default next to CLAUDE_RELAY_DB, ``default_files_dir``)."""
+    from src.relay.service import default_files_dir
+
+    relay = _relay
+    if relay is not None:
+        return relay.files_dir
+    return default_files_dir(os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db")
 
 
 def _prm_auto(data: dict) -> dict:
@@ -1734,6 +1810,9 @@ class _UIHandler(SimpleHTTPRequestHandler):
             return
 
         # ── API: PRM copilot — creators, drafts, decisions ─────────────
+        if self.path.split("?", 1)[0] == "/api/prm/file":         # one picture of a draft (GET only)
+            self._send_prm_file()
+            return
         if self.path.split("?", 1)[0] == "/api/prm":
             try:
                 self.send_json(_prm_state())
@@ -2509,6 +2588,48 @@ class _UIHandler(SimpleHTTPRequestHandler):
             for code in ["error", "exception", "400", "401", "403", "404", "405", "500"]
         ):
             logger.warning("HTTP %s", format % args)
+
+    def _send_prm_file(self):
+        """GET /api/prm/file (``_prm_file``; GET only: not in the POST list, a POST is 405): a draft's picture, streamed,
+        ``Cache-Control: no-store``, ``X-Content-Type-Options: nosniff``; another site's page (``Sec-Fetch-Site:
+        cross-site``, an <img> pointed here) gets 403, anything not found 404 (JSON, its length, the CORS echo).  The
+        origin and host checks of every request come first (``do_GET``)."""
+        if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+            self._send_plain_json(403, {"ok": False, "error": "只给本机的控制台看"})
+            return
+        try:
+            found = _prm_file(self.path.partition("?")[2])
+        except Exception:
+            logger.exception("Reading a draft's picture failed")
+            found = None
+        if found is None:
+            self._send_plain_json(404, {"ok": False, "error": "没有这张图"})
+            return
+        path, kind = found
+        try:
+            source = open(path, "rb")
+            size = os.fstat(source.fileno()).st_size
+        except OSError:
+            self._send_plain_json(404, {"ok": False, "error": "没有这张图"})
+            return
+        with source:
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")    # (only ever the picture its type says: review B)
+            self._send_cors_headers()
+            self.end_headers()
+            shutil.copyfileobj(source, self.wfile, 256 * 1024)
+
+    def _send_plain_json(self, status: int, data: dict):
+        body = json.dumps(data, ensure_ascii=False).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._send_cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
 
     def send_json(self, data):
         self.send_response(200)

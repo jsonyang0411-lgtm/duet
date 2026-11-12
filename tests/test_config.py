@@ -766,6 +766,22 @@ class GroupConfigTests(unittest.TestCase):
             self.assertIn(name, str(ctx.exception))
 
 
+    def test_our_own_people_are_a_list_of_names_like_the_bosses(self):
+        """PRM_GROUP_OURS (2026-11-11): our colleagues' names, empty by default, white space at either end dropped, at
+        most 10 different names of 1-20 characters (split as PRM_GROUP_WITH's)."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        self.assertEqual(BotConfig().prm_group_ours, "")
+        with patch.dict(os.environ, {"PRM_GROUP_OURS": " 品牌同事，测试运营 "}, clear=True):
+            self.assertEqual(load_config().prm_group_ours, "品牌同事，测试运营")
+        for good in ("", "品牌同事", ",".join(f"同事{n}" for n in range(10))):
+            _validate_config({"prm_group_ours": good})
+        for bad in (",".join(f"同事{n}" for n in range(11)), "品牌同事,品牌同事", "长" * 21, "🌸"):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({"prm_group_ours": bad})
+            self.assertIn("PRM_GROUP_OURS", str(ctx.exception))
+
+
 class ReplyPartsConfigTests(unittest.TestCase):
     """PRM_REPLY_PARTS (src/prm/service.py reply_parts, 2026-10-30): a reply in up to 3 messages by default, 1-5."""
 
@@ -816,6 +832,38 @@ class BossGroupsConfigTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 _validate_config({key: value})
             self.assertIn(name, str(ctx.exception))
+
+    def test_linked_groups_auto_is_off_by_default_and_only_off_or_on(self):
+        """PRM_LINKED_GROUPS_AUTO (接手任何合作群, decision 2026-11-10): off by default (a group linked by hand: its drafts
+        always wait for a person), the usual yes / no spellings, anything else refused."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        self.assertEqual(BotConfig().prm_linked_groups_auto, "off")
+        for env, want in (({}, "off"), ({"PRM_LINKED_GROUPS_AUTO": "on"}, "on"), ({"PRM_LINKED_GROUPS_AUTO": "yes"}, "on"),
+                          ({"PRM_LINKED_GROUPS_AUTO": "0"}, "off")):
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(load_config().prm_linked_groups_auto, want, env)
+        _validate_config({"prm_linked_groups_auto": "on"})
+        with self.assertRaises(RuntimeError) as ctx:
+            _validate_config({"prm_linked_groups_auto": "maybe"})
+        self.assertIn("PRM_LINKED_GROUPS_AUTO must be off or on", str(ctx.exception))
+
+    def test_groups_auto_link_and_her_side_are_off_by_default_and_only_off_or_on(self):
+        """PRM_GROUPS_AUTO_LINK (the groups link themselves when it is clear whose they are), PRM_GROUP_HER_SIDE (her
+        team's lines in a linked group count as hers) and PRM_REACH_LAST_SPOKE (what the bot starts goes where her side
+        last spoke), 2026-11-11: all off by default, the usual yes / no spellings, anything else refused."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        for field, name in (("prm_groups_auto_link", "PRM_GROUPS_AUTO_LINK"), ("prm_group_her_side", "PRM_GROUP_HER_SIDE"),
+                            ("prm_reach_last_spoke", "PRM_REACH_LAST_SPOKE")):
+            self.assertEqual(getattr(BotConfig(), field), "off")
+            for env, want in (({}, "off"), ({name: "on"}, "on"), ({name: "yes"}, "on"), ({name: "0"}, "off")):
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(getattr(load_config(), field), want, env)
+            _validate_config({field: "on"})
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({field: "maybe"})
+            self.assertIn(f"{name} must be off or on", str(ctx.exception))
 
     def test_what_the_mac_is_told_the_boss_is_called(self):
         """PRM_BOSS_CALL (review 2026-10-31): the bosses' names (PRM_GROUP_WITH) never leave this PC; a group job calls

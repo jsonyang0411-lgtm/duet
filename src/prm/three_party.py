@@ -32,6 +32,9 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 CREATING, CREATED, UNSURE, FAILED = "creating", "created", "unsure", "failed"
+# A deal's group the bot drafts in (``by``): a 老板拉的群 it took over, or one an operator linked by hand (接手任何合作群,
+# 2026-11-09): src/prm/boss_groups.py's, never read only here
+TAKEN_BY = ("boss", "manual")
 STATES = {CREATING: "正在建群", CREATED: "已建好", UNSURE: "不确定建没建成", FAILED: "没建成"}
 EVENT = "three_party"                  # the deal's record of each step (``{"state", ...}``)
 NOTICE = "three_party"                 # the deal's notice while a person has to look (``unsure``)
@@ -123,13 +126,13 @@ class ThreeParty:
 
     def deal_of_chat(self, chat: str) -> Optional[dict]:
         """The deal whose 三方群 this group is (made, its ``chat`` known: the bot made it, or found it), or None.  Not a
-        老板拉的群 (``by`` boss): that one is src/prm/boss_groups.py's."""
+        老板拉的群 (``by`` boss) nor one linked by hand (``by`` manual): those are src/prm/boss_groups.py's."""
         chat = str(chat or "")
         if not chat.endswith("@chatroom"):
             return None
         for deal in self._store.deals():
             group = deal.get("three_party") or {}
-            if group.get("state") == CREATED and group.get("chat") == chat and group.get("by") != "boss":
+            if group.get("state") == CREATED and group.get("chat") == chat and group.get("by") not in TAKEN_BY:
                 return deal
         return None
 
@@ -145,13 +148,27 @@ class ThreeParty:
         watched = 0
         for deal in self._store.deals():
             group = deal.get("three_party") or {}
-            if group.get("state") == CREATED and str(group.get("chat") or "").endswith("@chatroom") and group.get("by") != "boss":
+            if (group.get("state") == CREATED and str(group.get("chat") or "").endswith("@chatroom")
+                    and group.get("by") not in TAKEN_BY):
                 since = self.since_of(deal) if self.since_of is not None else float(group.get("at") or self._clock())
                 self._watch(str(group["chat"]), since)
                 watched += 1
         if watched:
             logger.info("PRM: 三方群: %d group(s) read again (read only)", watched)
         return watched
+
+    def read_again(self, deal: Optional[dict]) -> bool:
+        """This deal's 三方群 read only again (``watch_group``, from where ``since_of`` says), as ``watch_all`` does at
+        start: a group linked by hand that the admin's 「不接群」 (or the console's 「不接了」) gave back (接手任何合作群,
+        review 2026-11-09: PrmService.unlink_group).  False: nothing is read (no group, one drafted in, or a backend
+        that cannot read groups)."""
+        group = (deal or {}).get("three_party") or {}
+        if (not self.reading() or group.get("state") != CREATED
+                or not str(group.get("chat") or "").endswith("@chatroom") or group.get("by") in TAKEN_BY):
+            return False
+        since = self.since_of(deal) if self.since_of is not None else float(group.get("at") or self._clock())
+        self._watch(str(group["chat"]), since)
+        return True
 
     def _watch(self, chat: str, since: float) -> None:
         watch = getattr(self._backend, "watch_group", None)
@@ -197,7 +214,7 @@ class ThreeParty:
         out = state_out(deal)
         group = (deal or {}).get("three_party") or {}
         if out:                                   # (read only, for her private drafts: 三方群里的话)
-            out["reading"] = bool(group.get("state") == CREATED and group.get("chat") and group.get("by") != "boss"
+            out["reading"] = bool(group.get("state") == CREATED and group.get("chat") and group.get("by") not in TAKEN_BY
                                   and self.reading())
         tried = self._tries.get(int((deal or {}).get("id") or 0))
         return {**out, "tried": dict(tried)} if tried else out
@@ -367,11 +384,11 @@ class ThreeParty:
         if made:
             self._set(deal, {"state": CREATED, "at": now, "by": actor, **({"chat": group["chat"]} if group.get("chat") else {})},
                       now)
-            if group.get("chat") and group.get("by") != "boss":
+            if group.get("chat") and group.get("by") not in TAKEN_BY:
                 self._watch(str(group["chat"]), now - WATCH_BACK_SEC)
         else:
             self._set(deal, {}, now)
-            if group.get("chat") and group.get("by") != "boss":
+            if group.get("chat") and group.get("by") not in TAKEN_BY:
                 self._unwatch(str(group["chat"]))       # gone: no longer read
         return {"ok": True, "state": CREATED if made else ""}
 

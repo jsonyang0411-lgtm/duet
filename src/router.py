@@ -1,9 +1,10 @@
 """Message router — receives standardized messages and runs them through the business route.
 
 The ordered steps are in ``src/routing/steps.py``: skip the account's own lines, hand a
-listed creator's message to the Mac (PRM_EDGE), store, ``cc`` tasks to Claude Code on the
-Mac (CLAUDE_RELAY), a registered creator's message to the PRM copilot (PRM_COPILOT), the
-admin's account commands in a private chat, and silence for everything else.  No step
+listed creator's message to the Mac (PRM_EDGE), the admin's answers to the drafts told to the
+admin's chat (PRM_WECHAT_REVIEW), store, ``cc`` tasks to Claude Code on the Mac (CLAUDE_RELAY),
+a registered creator's message to the PRM copilot (PRM_COPILOT), the admin's account commands
+in a private chat, and silence for everything else.  No step
 calls a model: a group message or an unknown private chat never gets an answer.
 """
 

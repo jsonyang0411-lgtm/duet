@@ -12,11 +12,24 @@ counts) and adds ``attachments_named`` (every file the draft named) and
 ``attachments_missing`` (``[{"name", "why"}]``: outside assets/, missing, too big, the upload
 failed); an older worker sends neither.
 
+``handcards`` (handcards.py, 直播手卡: the products to make cards of) is in a job's schema only when its prompt
+offers cards (the worker's ``prm_schema``; this SCHEMA is the one without it); the Mac makes them and hands
+back ``handcards_made``, its verdict (the cards are among the files that came back).
+
+``operator_files`` (PRM_DRAFT_CONTEXT, src/prm/draft_context.py) are files the Mac sent back for the operators only
+(``[{"name", "why", "sha256"}]``: a sample order's side-by-side photo sheet), never attachments for the creator;
+``draft_context: {"v": 3, "gated": true}`` says the Mac checked the draft's sample order by photo (``Draft.gated``;
+an older mark is not one); ``photo_held`` names the item codes that check held for photo reasons (the console's
+「对过图了」) and ``photo_confirmed`` those it let go only by an operator's 「对过图了」 (``Draft.photo_held`` /
+``Draft.photo_confirmed``); ``photo_hats`` where an operator sees each held one (``Draft.photo_hats``).
+
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
 did not preview carries the verdict ``unavailable`` and cannot be executed.  A preview whose
 action the bot's own check refuses (``platforms.ActionRefused``: a Mac whose limits are wider
-than ``FORM_LIMITS``, say) loses the action, not the draft: ``platform_refused`` says why.
+than ``FORM_LIMITS``, say) loses the action, not the draft: ``platform_refused`` says why.  A worker that could not
+ask this bot what it knows (GET /relay/health, review 2026-11-09 N1) leaves a 专属链接 out and says so:
+``platform_held`` is ``PLATFORM_UNASKED`` (anything else there is ignored).
 
 This side is where it is trusted or not: ``parse_draft`` validates instead of
 repairing; anything it cannot use raises ``DraftError`` and nothing is drafted.
@@ -29,7 +42,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import platforms
+from . import draft_context, handcards, platforms
 from .store import STAGES
 
 # The kinds of message (8.1 of the assessment): they decide later what may go out unreviewed.
@@ -41,6 +54,8 @@ MESSAGE_KINDS = {
 MAX_DRAFT_CHARS = 1500
 MAX_SLOTS = 30
 MAX_ATTACHMENTS = 9
+# The worker could not ask the bot whether it knows 专属链接 the shop's way: the action was left out (``platform_held``).
+PLATFORM_UNASKED = "unasked"
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
 # The schema the worker hands to ``claude --json-schema`` (the same rules as below).
@@ -90,6 +105,23 @@ class Draft:
     # Why the Mac's platform action was left out ("" = it was not): the bot's own check refused it
     # (platforms.ActionRefused); the reply stays, as a plain draft for a person.
     platform_refused: str = ""
+    # The Mac's 直播手卡 for this draft (handcards.check_made: the cards among its files, or why none), or None.
+    handcards: Optional[dict] = None
+    # ``PLATFORM_UNASKED``: the Mac left a 专属链接 out, not able to ask this bot what it knows ("" = it did not)
+    platform_held: str = ""
+    # The files the Mac sent back for the operators only (PRM_DRAFT_CONTEXT: a sample order's photo sheet),
+    # ``[{"name", "why", "sha256"}]`` (draft_context.operator_entries): never sent to the creator.
+    operator_files: list = field(default_factory=list)
+    # The Mac checked the draft's sample order by photo (its ``draft_context: {"v": 3, "gated": true}``;
+    # draft_context.ungated).
+    gated: bool = False
+    # The item codes that check held for photo reasons (its ``photo_held``: the console offers 「对过图了」 for each)
+    # and those it let go only by an operator's 「对过图了」 (``photo_confirmed``); draft_context.codes_of.
+    photo_held: list = field(default_factory=list)
+    photo_confirmed: list = field(default_factory=list)
+    # Where an operator sees each held code (its ``photo_hats``, 2026-11-10: draft_context.hat_marks); None: an older
+    # worker's answer without it (the bot reads the preview's words instead).
+    photo_hats: Optional[list] = None
 
 
 def _text(value, limit: int) -> str:
@@ -157,6 +189,12 @@ def parse_draft(raw: str) -> Draft:
     elif data.get("platform_action") is not None:
         # An action the Mac did not preview (an older worker, or one without platforms).
         platform = platforms.unpreviewed_block(data["platform_action"])
+    cards = None
+    if data.get(handcards.MADE) is not None:
+        try:
+            cards = handcards.check_made(data[handcards.MADE])
+        except ValueError as e:
+            raise DraftError("bad_handcards", str(e)[:80]) from None
     return Draft(
         intent=_text(data.get("intent"), 200),
         slots=clean_slots,
@@ -170,4 +208,12 @@ def parse_draft(raw: str) -> Draft:
         attachments_named=None if named is None else [str(f).strip()[:200] for f in named if str(f).strip()],
         attachments_missing=_missing_files(missing),
         platform_refused=refused,
+        handcards=cards,
+        platform_held=PLATFORM_UNASKED if data.get("platform_held") == PLATFORM_UNASKED else "",
+        operator_files=draft_context.operator_entries(data.get(draft_context.OPERATOR_FILES)),
+        gated=draft_context.gated_of(data),
+        photo_held=draft_context.codes_of(data, draft_context.PHOTO_HELD) if draft_context.gated_of(data) else [],
+        photo_confirmed=(draft_context.codes_of(data, draft_context.PHOTO_CONFIRMED) if draft_context.gated_of(data)
+                         else []),
+        photo_hats=draft_context.hat_marks(data) if draft_context.gated_of(data) else None,
     )

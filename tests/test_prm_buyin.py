@@ -1284,3 +1284,24 @@ def test_a_buyin_draft_job_carries_her_douyin_id_for_the_invite_background(bot, 
     round_says(bot, clock, card_conv(line("d3", "在吗？", clock.now), cid=CID))
     [pending] = [j for j in jobs_of(bot, BUYIN_CHAT + CID) if j["status"] == "pending"]
     assert json.loads(pending["meta"])["creator"]["douyin_ids"] == ["dy_linked01", AWEME.upper()]
+
+
+def test_links_asked_for_in_baiying_go_on_as_after_a_wechat_draft(bot, clock):
+    """review 2026-11-09 F2: she asks for 专属链接 in 百应, and the 百应 draft records her prefix (the slot 「专属链接前缀」):
+    her 专属佣金 already open (no sample order, no chain), that product's link is asked for as after a WeChat draft."""
+    from test_prm_platform_flow import DESIGNATED, approve, block, mac_runs, record
+    from src.prm.service import LINK_SLOT
+    bot.prm.handle(bot.msg("好的，那就按 20% 来"))
+    job = bot.worker_takes()
+    bot.finish(job["id"], draft(message_kind="money", reply_draft="专属佣金设好啦", slots={}, platform=block(DESIGNATED)))
+    commission = bot.prm.store.packet_for_job(job["id"])
+    mac_runs(bot, approve(bot, commission), record())
+    bot.prm.send_approved()
+    step = bot.worker_takes()                                     # the step after it (no links yet): nothing to do
+    bot.finish(step["id"], draft(message_kind="other", reply_draft="", slots={}))
+    assert bot.worker_takes() is None
+    buyin_draft(bot, clock, text="要专属链接，前缀小美专属", slots={LINK_SLOT: "【小美专属】"})
+    job = bot.relay.store.latest_open(CREATOR, drafts_only=True, system=True)
+    meta = json.loads(job["meta"])
+    assert meta["step"]["action"] == "dy.channel_goods" and meta["step"]["prefix"] == "【小美专属】"
+    assert "title_prefix 填「【小美专属】」" in meta["system_note"]

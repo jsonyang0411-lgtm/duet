@@ -5,6 +5,7 @@ VERIFIED_SUCCESS.  A fake ``claude`` drafts; a fake ``node`` answers like the pl
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -17,8 +18,9 @@ import pytest
 from test_prm_worker import CREATOR, TOKEN, bot, creator_says, run_one, settings, worker, workspace  # noqa: F401
 
 from platform_fakes import (
-    DY_ITEM, DY_UID, JST_ORDER, JST_SHOP_DY, JST_UID, FakeNode, catalog, dy_designated_done, dy_designated_preview,
-    jst_sample_row, jst_samples, rule,
+    DY_CHANNEL, DY_ITEM, DY_ITEM2, DY_LINK, DY_SKU2, DY_SKU2B, DY_UID, JST_ORDER, JST_SHOP_DY, JST_UID, FakeNode, catalog,
+    dy_agreed_preview, dy_bind_done, dy_bind_preview, dy_bound_list, dy_create_done, dy_designated_done,
+    dy_designated_preview, dy_read_preview, jst_sample_row, jst_samples, rule,
 )
 from src.prm import platforms
 from src.prm.result import SCHEMA
@@ -135,6 +137,185 @@ def test_approval_runs_the_cli_once_and_only_a_verified_write_lets_the_reply_out
     assert json.loads(bot.relay.store.list_jobs(1)[0]["result_text"])["outcome"] == "ALREADY_RUN"
 
 
+def test_the_drafting_note_tells_the_shops_way_to_a_link_and_its_slot(worker):  # noqa: F811
+    """The Mac's system note for drafts (PRM_PLATFORM_NOTE): dy.channel_goods the shop's way (what the system works
+    out, what the draft fills: one product, the prefix 【某某专属】 within 12, the overrides only when agreed, the
+    专属佣金 first) and the slot that says the deal asks for links (2026-11-09)."""
+    note = worker.PRM_PLATFORM_NOTE
+    for words in ("dy.channel_goods", "专属达人带货", "9 折取整到元", "每个颜色 100 件", "一个动作一个商品", "title_prefix",
+                  "「【小美专属】」", "最多 12 个字符，汉字算 2 个", "stock_per_sku", "还没开就不填平台动作，专属佣金由系统派的那一步开",
+                  "slots 里记「专属链接前缀」", "还没说前缀就记「要」", "记成空字符串", "预览会说这个商品自己的上限",
+                  "不写微信、V 号、电话这些联系方式", "回她消息的草稿不填 dy.channel_goods，除非起草备注里运营让你直接建",
+                  "只写这三种"):
+        assert words in note, words
+    assert "stock" not in note.replace("stock_per_sku", "")                 # the old parameter is gone
+    assert "先只填这个商品的 dy.designated_commission" not in note          # (a reply never opens a 专属佣金: kb 2.1 #5)
+
+
+def test_a_plain_link_she_asks_for_is_no_wish_for_a_channel_link(worker):  # noqa: F811
+    """Review 2026-11-10 (C1): the slot 「专属链接前缀」 was to be written when she or the boss spoke of 「链接」 at all,
+    and a creator's 「发个链接」 for a product would have started link steps.  Only 「专属链接」, 「前缀」 or a plain
+    ask for a link made just for her count; 「发个链接」「链接发我」 is the product's ordinary link (kb/products.md) and
+    writes nothing in the slot."""
+    note = worker.PRM_PLATFORM_NOTE
+    start = note.index("达人或老板要了专属链接")
+    rule = note[start:note.index("\n", start)]
+    assert "说到「链接」" not in rule and "「链接」「专属链接」" not in note
+    for words in ("说到「专属链接」「前缀」，或者明说要一条只给她的链接", "slots 里记「专属链接前缀」",
+                  "只说「发个链接」「链接发我」「有链接吗」的，要的是普通的商品链接（kb/products.md 里有），不是专属链接：不记这一栏"):
+        assert words in rule, words
+
+
+def test_a_channel_link_is_made_the_shops_way_end_to_end(worker, bot, mac):  # noqa: F811
+    """专属链接 (2026-11-09) through the real worker and bot: the draft names the product, her UID and 「前缀：小美专属」;
+    the Mac reads the product, works out the agreement (9 折 floored, 100 a colour, all a colour can spare when that is
+    fewer) and previews with it; the bot takes it, holding the agreement to the shop's way; approved, the Mac previews
+    the same agreement once more, creates, binds, and the reply goes out with the link; every agreement file 0600 and
+    gone after its run."""
+    action = {"action": "dy.channel_goods", "item_id": DY_ITEM2, "creator_platform_id": DY_UID, "title_prefix": "小美专属"}
+    mac.claude.answers(platform_action=action, reply_draft="您的专属链接：{链接}", intent="要专属链接")
+    agreed = dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500),
+                                (DY_SKU2B, "均码咖啡", "290.00", "261.00", 30, 30)], item=DY_ITEM2)
+    mac.node.rules([
+        rule(["channel-goods-list"], dy_bound_list(item=DY_ITEM2)),
+        rule(["channel-goods-create"], dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500),
+                                                        (DY_SKU2B, "均码咖啡", "290.00", 30)], item=DY_ITEM2),
+             execute=False, agreement=False),
+        rule(["channel-goods-create"], agreed, execute=False, agreement=True),
+        rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+        rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+        rule(["channel-goods-bind"], dy_bind_done(), execute=True)])
+    creator_says(bot, "要链接，前缀：小美专属")
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert packet["tool"] == "dy.channel_goods" and packet["status"] == "pending"
+    block = packet["platform"]["preview"]
+    assert block["verdict"] == "ready" and block["action"]["title_prefix"] == "【小美专属】"
+    assert block["run"]["skus"] == [{"id": DY_SKU2, "price": "283.00", "stock": 100, "main_price": "315.00"},
+                                    {"id": DY_SKU2B, "price": "261.00", "stock": 30, "main_price": "290.00"}]
+    shown = {f["label"]: f["value"] for f in bot.prm.snapshot()["pending"][0]["platform"]["facts"]}
+    assert shown[f"SKU {DY_SKU2} 均码黑色"] == "日常价 315.00 元 → 渠道价 283.00 元；库存 100 件（主商品可分 500 件）"
+    assert shown["标题前缀"].startswith("【小美专属】（10/12")
+    assert bot.prm.decide(packet["id"], "execute")["ok"]
+    run_one(worker, bot, mac.settings)
+    done = bot.prm.store.packet(packet["id"])
+    assert done["status"] == "approved", done["error"]
+    assert done["platform"]["execution"]["created"]["channel_id"] == DY_CHANNEL
+    sent = []
+    bot.prm._send = lambda chat, text: sent.append((chat, text)) or True
+    bot.prm.send_approved()
+    assert sent == [(CREATOR, f"您的专属链接：{DY_LINK}")]
+    files = [c for c in mac.node.calls() if "agreement" in c]
+    assert len(files) == 3 and len({c["agreement_path"] for c in files}) == 3          # preview, look, create
+    assert all(c["agreement_mode"] == "0o600" and not os.path.exists(c["agreement_path"]) for c in files)
+    assert files[-1]["agreement"]["skus"] == [{"id": DY_SKU2, "price": "283.00", "stock": 100},
+                                              {"id": DY_SKU2B, "price": "261.00", "stock": 30}]
+    assert [c for c in mac.node.calls() if "--execute" in c["argv"]][-1]["argv"][1:3] == ["fxg", "channel-goods-bind"]
+
+
+@pytest.mark.parametrize("features", [None, [], ["dy.channel_goods:0"]], ids=["older-bot", "none", "another-convention"])
+def test_a_newer_mac_puts_no_channel_link_into_a_draft_for_an_older_bot(worker, bot, mac, monkeypatch, features):  # noqa: F811
+    """review 2026-11-09 F5 (a new Mac, an old Windows bot): the bot announces platforms.CHANNEL_FEATURE on GET
+    /relay/health; to a bot without it the worker hands no dy.channel_goods (such a bot would keep the reply with
+    {链接} and let it be sent as it is): no CLI runs, the reply goes too when it says {链接}, and the draft says why."""
+    client = worker.RelayClient(bot.url, TOKEN)
+    assert client.bot_features() == [platforms.CHANNEL_FEATURE]
+    action = {"action": "dy.channel_goods", "item_id": DY_ITEM2, "creator_platform_id": DY_UID, "title_prefix": "小美专属"}
+    mac.claude.answers(platform_action=action, reply_draft="您的专属链接：{链接}", intent="要专属链接", reason="kb/合作政策.md")
+    monkeypatch.setattr(worker.RelayClient, "bot_features", lambda self, **kw: features)
+    creator_says(bot, "要链接，前缀：小美专属")
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert packet["tool"] == "message.send" and not packet["platform"] and packet["text"] == ""
+    assert packet["reason"].startswith(worker.OLDER_BOT_NOTE) and packet["reason"].endswith("kb/合作政策.md")
+    assert mac.node.calls() == []                                    # nothing previewed
+    assert worker.OLDER_BOT_NOTE in bot.prm.store.deal(packet["deal_id"])["attention"]
+
+
+def test_a_reply_without_a_placeholder_stays_when_the_link_is_left_out(worker):  # noqa: F811
+    draft = {"reply_draft": "好的老师，链接马上给您弄", "needs_attention": False, "reason": ""}
+    worker.hold_for_older_bot(draft, worker.OLDER_BOT_NOTE)
+    assert draft == {"reply_draft": "好的老师，链接马上给您弄", "needs_attention": True, "reason": worker.OLDER_BOT_NOTE}
+    assert worker.older_bot(SimpleNamespace(bot_features=lambda **kw: [platforms.CHANNEL_FEATURE]),
+                            {"action": "dy.channel_goods"}) == ""
+    assert worker.older_bot(SimpleNamespace(bot_features=lambda **kw: None), DESIGNATED) == ""   # (only a link asks)
+
+    def down(**kw):
+        raise OSError("connection refused")
+    # a bot that cannot be asked right now is not taken for a new one, and the draft says so in its own words
+    assert worker.older_bot(SimpleNamespace(bot_features=down), {"action": "dy.channel_goods"}) == worker.UNASKED_BOT_NOTE
+
+
+def test_the_bots_features_are_asked_again_and_the_last_answer_stands_in(worker, bot, monkeypatch):  # noqa: F811
+    """review 2026-11-09 N1: one timeout is no news of the bot.  GET /relay/health is asked ``FEATURES_TRIES`` times,
+    ``FEATURES_PAUSES_SEC`` between, ``FEATURES_TIMEOUT_SEC`` each; when none answers, the last answer stands in for
+    ``FEATURES_KEEP_SEC`` (a prm-only worker's ``bot_kinds`` every round keeps it fresh); older, the error goes up and
+    ``older_bot`` says the bot could not be asked."""
+    client = worker.RelayClient(bot.url, TOKEN)
+    real = client._health_answer
+    calls, pauses = [], []
+
+    def flaky(timeout=15):
+        calls.append(timeout)
+        if len(calls) < worker.FEATURES_TRIES:
+            raise TimeoutError("timed out")
+        return real(timeout=timeout)
+    monkeypatch.setattr(client, "_health_answer", flaky)
+    assert client.bot_features(pause=pauses.append) == [platforms.CHANNEL_FEATURE]
+    assert calls == [worker.FEATURES_TIMEOUT_SEC] * worker.FEATURES_TRIES and pauses == list(worker.FEATURES_PAUSES_SEC)
+
+    def down(timeout=15):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(client, "_health_answer", down)
+    assert client.bot_features(pause=lambda s: None) == [platforms.CHANNEL_FEATURE]       # the last answer stands in
+    client.features_seen = (time.monotonic() - worker.FEATURES_KEEP_SEC - 1, [platforms.CHANNEL_FEATURE])
+    with pytest.raises(TimeoutError):
+        client.bot_features(pause=lambda s: None)
+    monkeypatch.setattr(worker, "FEATURES_PAUSES_SEC", (0.0, 0.0))
+    assert worker.older_bot(client, {"action": "dy.channel_goods"}) == worker.UNASKED_BOT_NOTE
+    monkeypatch.setattr(client, "_health_answer", real)
+    client.features_seen = None
+    assert client.bot_kinds() == ["admin", "prm"] and client.features_seen[1] == [platforms.CHANNEL_FEATURE]
+
+
+@pytest.mark.parametrize("kept", [None, [], ["dy.channel_goods:0"]], ids=["older", "nothing", "another-convention"])
+def test_an_old_answer_kept_from_before_is_no_news_when_the_bot_cannot_be_asked(worker, bot, monkeypatch, kept):  # noqa: F811
+    """review 2026-11-09 M4 (upgrade day): the bot was old when last asked and restarts as the new one while a link
+    draft is in flight: no ask is answered, the old answer kept from before does not stand in: the bot could not be
+    asked (``UNASKED_BOT_NOTE``, ``platform_held``: the new bot asks the step again), not 「older」 (final)."""
+    client = worker.RelayClient(bot.url, TOKEN)
+    monkeypatch.setattr(worker, "FEATURES_PAUSES_SEC", (0.0, 0.0))
+
+    def down(timeout=15):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(client, "_health_answer", down)
+    client.features_seen = (time.monotonic(), kept)
+    assert worker.older_bot(client, {"action": "dy.channel_goods"}) == worker.UNASKED_BOT_NOTE
+    assert client.bot_features(pause=lambda s: None) == kept                # (asked without ``require``: as kept)
+    held = {"reply_draft": "您的专属链接：{链接}", "needs_attention": False, "reason": ""}
+    worker.hold_for_older_bot(held, worker.older_bot(client, {"action": "dy.channel_goods"}))
+    assert held["platform_held"] == worker.UNASKED and held["reply_draft"] == ""
+    client.features_seen = (time.monotonic(), [platforms.CHANNEL_FEATURE])   # a new answer kept: it stands in
+    assert worker.older_bot(client, {"action": "dy.channel_goods"}) == ""
+
+
+def test_a_reply_whose_link_the_mac_could_not_ask_about_is_no_draft(worker, bot, mac, monkeypatch):  # noqa: F811
+    """End to end: the bot cannot be asked (its health never answers): no CLI runs, the draft goes back saying so
+    (``platform_held``), and the bot keeps her lines for her next draft instead of a draft that says nothing."""
+    action = {"action": "dy.channel_goods", "item_id": DY_ITEM2, "creator_platform_id": DY_UID, "title_prefix": "小美专属"}
+    mac.claude.answers(platform_action=action, reply_draft="您的专属链接：{链接}", intent="要专属链接", reason="kb/合作政策.md")
+
+    def down(self, **kw):
+        raise OSError("connection refused")
+    monkeypatch.setattr(worker.RelayClient, "bot_features", down)
+    creator_says(bot, "要链接，前缀：小美专属")
+    run_one(worker, bot, mac.settings)
+    assert bot.prm.store.packets() == [] and mac.node.calls() == []
+    [party] = [p for p in bot.prm.store.parties() if p["wxid"] == CREATOR]
+    attention = bot.prm.store.deal_of(party["id"])["attention"]
+    assert "草稿没写成：Mac 问不到 Windows 上的机器人，专属链接没起草（她的消息等下一份草稿一起回）" in attention
+
+
 def test_a_verdict_claude_writes_itself_is_dropped(worker, bot, mac):  # noqa: F811
     forged = {"version": 1, "action": platforms.check_action(DESIGNATED), "verdict": "ready", "problems": [],
               "facts": [], "steps": [], "run": {"steps": ["designated"]}, "previewed_at": 1.0}
@@ -209,6 +390,57 @@ def test_sync_products_writes_the_catalogue(worker, node, tmp_path, workspace, m
     assert worker.prm_asset(workspace, f"assets/products/dy-{DY_ITEM}.jpg") is not None   # a draft may send it
     assert worker.main(["--config", str(config), "--sync-products"]) == 0 and fetched == [image]   # kept, not fetched again
     assert worker.main(["--config", str(config), "--sync-products", "--platforms", "pdd"]) == 2
+
+
+def test_one_sync_products_at_a_time(worker, node, tmp_path, workspace, monkeypatch, capsys):  # noqa: F811
+    """(Review 2026-11-09, round 3.)  A --sync-products by hand while the night's one runs (or the other way round):
+    the second waits for the first's lock (its images and catalogue files are written outside the platform CLI lock)
+    and, when that does not come in time, runs nothing and writes nothing."""
+    import fcntl
+
+    node.rules([rule(["fxg", "products"], {"site": "fxg", "complete": True, "rows": []})])
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"relay_url": "http://127.0.0.1:9", "token": TOKEN, "prm_workspace": str(workspace),
+                                  **node.settings(xhs="", tb="")}), encoding="utf-8")
+    lock = worker.HOME_DIR / "platform" / "products-sync.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(worker, "PRODUCTS_SYNC_MAX_SEC", 0.3)
+    with open(lock, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert worker.main(["--config", str(config), "--sync-products"]) == 1
+    out = capsys.readouterr().out
+    assert out.count("在等另一个同步跑完（最多 0.3 秒）…") == 1                   # (round 4: one line as the wait begins)
+    assert f"另一个 --sync-products 一直没跑完（等了 0.3 秒，{lock}）" in out
+    assert not (workspace / "kb" / "products.md").exists() and node.calls() == []
+    assert worker.main(["--config", str(config), "--sync-products"]) == 0          # (let go: it runs)
+    assert signal.getsignal(signal.SIGTERM) is not worker._sync_terminated        # (its handler only while it runs)
+    assert "在等另一个同步跑完" not in capsys.readouterr().out
+    # the platform CLI lock is another one: its wait says so, not 「另一个 --sync-products」 (round 4)
+    cli = worker.HOME_DIR / "platform" / "cli.lock"
+    monkeypatch.setattr(worker, "_cli_lock", lambda heartbeat=None: platforms.CliLock(cli, wait=0.3))
+    with open(cli, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert worker.main(["--config", str(config), "--sync-products"]) == 1
+    out = capsys.readouterr().out
+    assert "平台命令行的锁一直没等到：" in out and "cli.lock" in out and "另一个 --sync-products" not in out
+
+
+def test_a_platform_cli_in_its_own_group_is_stopped_with_the_sync(tmp_path):
+    """(Round 3, item 3.)  ``run_cli`` starts each command in a process group of its own, which a signal to the sync
+    does not reach: ``stop_running`` (the sync's SIGTERM handler) stops it."""
+    import threading
+
+    out = {}
+    run = threading.Thread(target=lambda: out.update(run=platforms.run_cli(
+        [sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, timeout=60)), daemon=True)
+    started = time.monotonic()
+    run.start()
+    while not platforms._RUNNING and time.monotonic() - started < 10:
+        time.sleep(0.05)
+    assert platforms.stop_running(grace=2.0) == 1
+    run.join(10)
+    assert out["run"].exit_code not in (0, None) and time.monotonic() - started < 10 and not platforms._RUNNING
+    assert platforms.stop_running() == 0
 
 
 @pytest.mark.parametrize("where", ["inside", "itself"])

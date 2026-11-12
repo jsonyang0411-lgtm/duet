@@ -1,8 +1,8 @@
 import { Fragment, useState } from 'react'
-import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree } from '@phosphor-icons/react'
+import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree, DeviceMobile } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine, wechatReviewNote, photoConfirm, photoUnconfirm } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -27,6 +27,8 @@ import { FriendAddList } from './FriendAddCard'
 // 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us
 // (``channel`` "group") is tagged 「群里 · <群名>」 and its 发送 asks first: it goes in the group, where
 // the boss sees it. A group that needs a person to say which member she is gets one line at the top.
+// 微信里审批草稿 (PRM_WECHAT_REVIEW): one line at the top says the drafts also go to the admin's WeChat (or why they
+// cannot), and a draft told there is tagged 已发到微信; deciding it here or there is the same decision.
 
 export default function ReviewPanel() {
   const { data, err, reload } = usePrm(4000)
@@ -41,6 +43,7 @@ export default function ReviewPanel() {
         />
         {err && <Note kind="need">{err}</Note>}
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
+        <WechatReviewLine d={data} />
         {buyinNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={ChatsCircle}>{text}</Note>)}
         {bossGroupNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={UsersThree}>{text}</Note>)}
         {data?.hand_samples_problem && <Note kind="warn">{data.hand_samples_problem}</Note>}
@@ -49,13 +52,14 @@ export default function ReviewPanel() {
         <AutoModeBar d={data} onDone={reload} />
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
         <NightAlerts alerts={data?.night_alerts || []} onDone={reload} />
+        <GroupAlerts alerts={data?.group_alerts || []} onDone={reload} />
         {data && !pending.length && (
           <Empty title="现在没有要审批的草稿">已登记的达人发来消息后，Mac 写好的回复会出现在这里。</Empty>
         )}
         <div className="stack" style={{ gap: 12 }}>
           {pending.map((p) => (p.channel === 'buyin'
             ? <BuyinCard key={p.id} p={p} onDone={reload} />
-            : <DraftCard key={p.id} p={p} canSend={!!data?.can_send} replyParts={data?.reply_parts || 1} onDone={reload} />))}
+            : <DraftCard key={p.id} p={p} canSend={!!data?.can_send} replyParts={data?.reply_parts || 1} macOnline={(data?.worker_kinds || []).includes('prm')} onDone={reload} />))}
         </div>
         <FriendAddList d={data} onDone={reload} />
         <RecentCard d={data} onDone={reload} />
@@ -63,6 +67,13 @@ export default function ReviewPanel() {
       </div>
     </div>
   )
+}
+
+/** 微信里审批草稿 (PRM_WECHAT_REVIEW): the drafts also go to the admin's WeChat, or why they cannot. */
+function WechatReviewLine({ d }) {
+  const note = wechatReviewNote(d)
+  if (!note) return null
+  return <div className="prm-wechat-review"><Note kind={note[0]} icon={DeviceMobile}>{note[1]}</Note></div>
 }
 
 /** "〈手机1〉 = 138****5678" and, after a click that is written down, the full numbers. */
@@ -163,14 +174,34 @@ function AutoModeBar({ d, onDone }) {
   )
 }
 
-/** 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us goes out in that group. */
+/** PRM_REACH_LAST_SPOKE (2026-11-11): why one the bot started goes to the group though she may have a private chat. */
+const REACH_WHY = '她那边最近是在这个群里说的话，所以机器人主动发的这一条也发在群里。'
+const reachWhy = (p) => (p.reach === 'last_spoke' ? REACH_WHY : '')
+
+/** 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us goes out in that group; one
+ *  the admin linked by hand (``group_manual``, 接手任何合作群) need have no boss in it; one the bot started that goes there
+ *  because her side last spoke there (``reach``) says so. */
 function GroupTag({ p }) {
   if (!inGroup(p)) return null
   return (
-    <span className="tag warn prm-group-tag" title={`发在老板拉的群「${p.group_name || ''}」里（不是她的私聊），老板也看得到`}>
-      <UsersThree /><span className="prm-group-name">群里 · {p.group_name || '老板拉的群'}</span>
+    <span className="tag warn prm-group-tag" title={(p.group_manual ? `发在群「${p.group_name || ''}」里（不是她的私聊），群里的人都看得到`
+      : `发在老板拉的群「${p.group_name || ''}」里（不是她的私聊），老板也看得到`) + (reachWhy(p) ? `；${reachWhy(p)}` : '')}>
+      <UsersThree /><span className="prm-group-name">群里 · {p.group_name || (p.group_manual ? '手动接的群' : '老板拉的群')}</span>
     </span>
   )
+}
+
+/** 「已发到微信」's tooltip (微信里审批草稿): what can be done for the draft from the admin's WeChat, the same decision as
+ * here. Its pictures did not reach the chat (``wechat_console``): only 不发 there. A platform draft runs from WeChat only
+ * when the bot says so (``wechat_execute``: the preview it was told with, still approvable). A sample order whose held
+ * hats its notice numbered (``wechat_photo``, 2026-11-10): an answer quoting it confirms them, 「对过图 1」. */
+function wechatTitle(p) {
+  const at = `${fmtClock(p.wechat_at)} 发到管理员微信里了`
+  if (p.wechat_console) return `${at}，但要看的图没发过去：这一份在微信里只能回 2 不发，要在这里看过再批`
+  if (p.platform?.previewing) return `${at}：正在重新预览，新的预览出来以后会再发一条通知`
+  if (p.wechat_photo) return `${at}：扣着的帽子在微信里引用那条通知回「对过图 1」这样也能确认（和这里点是同一个确认）；都确认完机器人自己重新预览、再发一条通知`
+  if (p.platform && !p.wechat_execute) return `${at}：这一份微信里不能执行（在微信里只能回 2 不发），要在这里「批准并执行」`
+  return `${at}：在微信里${p.platform ? '引用通知回「执行」/ 2' : '回 1 / 2 / 改'} 也行，和这里点是同一个决定`
 }
 
 /** A draft the 下班时段 window (or 自动模式 by day: ``auto_mode``) sent by itself. */
@@ -214,6 +245,37 @@ function HandSamples({ rows, onDone }) {
           <div className="f-hint">{h.sent_at ? `${fmtClock(h.sent_at)} 发货；` : ''}手动建的寄样单：机器人没有替她填进合作单，告诉她运单号以后点「知道了」</div>
         </Banner>
       ))}
+    </div>
+  )
+}
+
+/** 接手任何合作群 (2026-11-09): her lines in a group whose link ended before they were answered. The bot never answers
+ *  them in another chat; each stays until 已处理 (or her next line there, the group linked again). */
+function GroupAlerts({ alerts, onDone }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState('')
+  if (!alerts.length) return null
+  const done = async (a) => {
+    const key = `${a.deal_id}:${a.chat}`
+    setBusy(key)
+    try {
+      await dealAction({ action: 'group_left_done', deal_id: a.deal_id, chat: a.chat })
+      toast.ok('已标为处理过了')
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy('') }
+  }
+  return (
+    <div className="stack prm-group-alerts" style={{ gap: 8 }}>
+      {alerts.map((a) => {
+        const key = `${a.deal_id}:${a.chat}`
+        return (
+          <Banner key={key} kind="warn" title={`${a.party_name} · 不接的群里还有话没回`}
+            actions={<button type="button" className="btn sm" disabled={busy === key} onClick={() => done(a)}><CheckCircle />已处理</button>}>
+            <div>{a.text}</div>
+            <div className="f-hint">机器人不会在她的私聊里回这些话；在群里回过以后点「已处理」</div>
+          </Banner>
+        )
+      })}
     </div>
   )
 }
@@ -266,8 +328,25 @@ function StepView({ st }) {
   )
 }
 
+/** The operators' own pictures of a draft (PRM_DRAFT_CONTEXT: a sample order's photo sheet): shown here, never sent to her. */
+function OperatorFiles({ files }) {
+  if (!files?.length) return null
+  return (
+    <div className="stack prm-operator-files" style={{ gap: 6 }}>
+      {files.map((f) => (
+        <figure key={f.n} className="prm-operator-file" style={{ margin: 0 }}>
+          {f.kept
+            ? <img src={f.url} alt={f.name} loading="lazy" style={{ maxWidth: '100%', borderRadius: 4 }} />
+            : <div className="f-hint">{f.name}（图已经清理掉了）</div>}
+          <figcaption className="f-hint">只给运营看（不发给达人）：{f.why || f.name}</figcaption>
+        </figure>
+      ))}
+    </div>
+  )
+}
+
 /** A draft's platform action: what it will do, the Mac's verdict, and the detail behind it. */
-function PlatformBox({ pf }) {
+function PlatformBox({ pf, files }) {
   const [open, setOpen] = useState(false)
   const ex = pf.execution
   return (
@@ -286,6 +365,7 @@ function PlatformBox({ pf }) {
       {pf.requested && <div className="f-hint">草稿里写的：<span className="mono">{JSON.stringify(pf.requested)}</span></div>}
       {pf.problems.map((t) => <Note key={t} kind="need">{t}</Note>)}
       {pf.facts.map((f, i) => <div key={i} className="f-hint"><b>{f.label}：</b>{f.value}</div>)}
+      <OperatorFiles files={files} />
       {ex && <div className="f-hint">执行结果：<span className={`tag ${outcomeTag(ex.outcome)}`}>{ex.outcome}</span> {ex.outcome_label}</div>}
       {pf.steps.length > 0 && (
         <button type="button" className="link" onClick={() => setOpen(!open)}>{open ? '收起预览明细' : `看预览明细（${pf.steps.length} 条命令）`}</button>
@@ -299,14 +379,116 @@ function PlatformBox({ pf }) {
   )
 }
 
-function DraftCard({ p, canSend, replyParts = 1, onDone }) {
+// 直播手卡 (PRM_HANDCARDS, src/prm/handcards.py): the cards of a draft as pictures (GET /api/prm/file, kind
+// attachment: the draft's own files), each opening at full size, and the Mac's note on them (the catalogue's date,
+// every 待定, what was inferred, the 口径 it reused, the words cut); or why none were made; cards whose 双11 line is
+// past its end date cannot go (the bot refuses them too): only 改了再发 sends the edited words, without the cards, after
+// a confirm (``TEXT_ONLY``).
+const PICTURE = /\.(png|jpe?g|webp)$/i
+const cardsFailed = (p) => !!p.handcards && !p.handcards.ok
+const cardsExpired = (p) => !!p.handcards?.expired
+const cardUrl = (p, n) => `/api/prm/file?packet=${p.id}&kind=attachment&n=${n}`
+const EXPIRED = '手卡上的双11价已过期，请重新做手卡'
+const TEXT_ONLY = '过期的手卡不会发出，只发这段话'
+// The cards' line as things stand: left out (改了再发 of out-of-date cards), waiting for a person, going out.
+const cardsLine = (p, c) => {
+  if (c.left_out) return '过期的手卡没有附上：这条只发改过的话'
+  if (p.status === 'executing') return `手卡 ${c.count} 张：平台上核验成功以后随回复一起发`
+  if (p.status === 'approved' || p.status === 'sending') return `手卡 ${c.count} 张随这条一起发出`
+  return `手卡 ${c.count} 张：看过卡片再发；要改的话在 Mac 上照下面的单子改了重出。`
+}
+
+function HandcardsNote({ p }) {
+  const pictures = (p.attachments || []).map((a, n) => [a, n]).filter(([a]) => PICTURE.test(a.name || ''))
+  const c = p.handcards
+  return (
+    <div className="stack prm-handcards" style={{ gap: 6 }}>
+      {c.ok && pictures.length > 0 && (
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          {pictures.map(([a, n]) => (
+            <a key={a.name} href={cardUrl(p, n)} target="_blank" rel="noreferrer" title={`${a.name}（点开看大图）`}>
+              <img src={cardUrl(p, n)} alt={a.name} loading="lazy"
+                style={{ height: 120, borderRadius: 6, border: '1px solid var(--line)', display: 'block' }} />
+            </a>
+          ))}
+        </div>
+      )}
+      {c.ok && c.expired && <Note kind="warn">{EXPIRED}（卡上的双11 那一行到 {c.promo_until} 为止）：这份不能原样发。要手卡就点「不发」，再到合作单里点「做手卡」；只回她一段话就「改了再发」（{TEXT_ONLY}）。</Note>}
+      {c.ok
+        ? !c.expired && <div className="f-hint prm-handcards-line">{cardsLine(p, c)}</div>
+        : <Note kind="warn">手卡没做成：{(c.problems || []).join('；') || 'Mac 没说为什么'}。草稿里没附手卡，话不能原样发。</Note>}
+      {c.note && <div className="f-hint prm-handcards-note" style={{ whiteSpace: 'pre-wrap' }}>{c.note}</div>}
+    </div>
+  )
+}
+
+/** 「对过图了」 (PRM_DRAFT_CONTEXT, 2026-11-09): the hats the Mac held for photos on a waiting sample order. An operator who
+ * compared the pictures (the sheet above) confirms one for her deal; the next 「重新预览」 takes it, and the bot asks for
+ * that one itself once the last held hat is confirmed (2026-11-10: the answer's ``repreview``; the card then shows it
+ * under way); 「撤销」 takes it back (a draft whose preview went by it then waits for a new preview, which nothing starts
+ * by itself). Words in the 起草备注 confirm nothing. */
+function PhotoHeld({ p, macOnline = true, onDone }) {
   const toast = useToast()
+  const [busy, setBusy] = useState('')
+  const rows = p.photo_held || []
+  if (!rows.length || p.status !== 'pending') return null
+  const previewing = Boolean(p.platform?.previewing)
+  const left = rows.filter((h) => h.held && !h.confirmed).length   // held hats nobody confirmed yet
+  // a held hat that is confirmed: previewed again by the bot itself once none is left (shown while it runs)
+  // (``macOnline``: a worker on the Mac that writes drafts was heard from lately; not: the new preview waits for it)
+  const confirmedLine = (h) => (previewing
+    ? (macOnline ? `已确认 ${h.code}，正在重新预览（按确认再核）` : `已确认 ${h.code}；Mac 现在不在线，重新预览要等它上线`)
+    : left > 0 ? `已确认 ${h.code}，还有 ${left} 顶扣着：都确认完自动重新预览`
+      : `已确认 ${h.code}，点「重新预览」按确认再核`)
+  const act = async (h, undo) => {
+    setBusy(h.code)
+    try {
+      if (undo) {
+        await photoUnconfirm(p.deal_id, h.code)
+        toast.ok(`已撤销 ${h.code} 的「对过图了」`)
+      } else {
+        const done = await photoConfirm(p.deal_id, p.id, h.code)
+        toast.ok(done?.repreview ? (done.mac_online === false ? `已确认 ${h.code}；Mac 现在不在线，重新预览要等它上线` : `已确认 ${h.code}，正在重新预览`)
+          : done?.left?.length ? `已确认 ${h.code}，还有 ${done.left.length} 顶扣着`
+            : `已确认 ${h.code}，点「重新预览」按确认再核`)
+      }
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy('') }
+  }
+  return (
+    <div className="stack prm-photo-held" style={{ gap: 6 }}>
+      <div className="f-hint">Mac 对图扣着的帽子：看过上面的对图单、对过图再点（这张合作单的这个编码都算，撤销以前一直算）</div>
+      {rows.map((h) => (
+        <div key={h.code} className="row prm-photo-row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {h.confirmed ? (
+            <>
+              <span className="tag ok mono">{h.code}</span>
+              <span className="f-hint">{h.held ? confirmedLine(h) : `已确认 ${h.code}：这份预览按确认核过`}{h.at ? `（${fmtClock(h.at)}）` : ''}</span>
+              <button type="button" className="btn ghost" disabled={Boolean(busy) || previewing} onClick={() => act(h, true)}>撤销</button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="btn" disabled={Boolean(busy) || previewing} onClick={() => act(h, false)}>对过图了，用 {h.code}</button>
+              {!h.held && <span className="f-hint">撤销了 {h.code} 的「对过图了」：点「重新预览」再核</span>}
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function DraftCard({ p, canSend, replyParts = 1, macOnline = true, onDone }) {
+  const toast = useToast()
+  // a 「改了再执行」 that could not be queued for the Mac: the edited reply is kept for the next try (only the edit box has it)
+  const kept = p.status === 'pending' && p.platform && p.final_text != null && p.final_text !== p.text ? p.final_text : null
   const [editing, setEditing] = useState(false)
-  const [text, setText] = useState(p.text)
+  const [text, setText] = useState(kept ?? p.text)
   const [busy, setBusy] = useState(false)
   const [dropping, setDropping] = useState(false)
   const [executing, setExecuting] = useState(null)   // the text to execute with (null = no dialog)
   const [sending, setSending] = useState(null)       // 老板拉的群: the send that asks first ({action, text}; null = no dialog)
+  const [textOnly, setTextOnly] = useState(null)     // 直播手卡 out of date: the edited words that go without the cards
   const pf = p.platform
   const group = inGroup(p)                           // it goes out in the boss's group, where he sees it
   const waiting = p.status !== 'pending'
@@ -316,12 +498,14 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       if (action === 'execute') await executePlatform(p.id, body)
       else if (action === 'repreview') await repreview(p.id)
       else await decide(p.id, action, body)
-      toast.ok({ drop: '这条不发了', execute: '已批准，Mac 正在平台上执行', repreview: '已请 Mac 重新预览' }[action]
+      toast.ok({ drop: '这条不发了', execute: '已批准，Mac 正在平台上执行', repreview: '已请 Mac 重新预览',
+        redraft: '在重新起草：写好的新草稿会换掉这一份' }[action]
         || (group ? '已确认，正在发到群里' : '已确认，正在发送'))
       setEditing(false)
       setDropping(false)
       setExecuting(null)
       setSending(null)
+      setTextOnly(null)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
@@ -335,7 +519,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<><GroupTag p={p} />{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
+      actions={<><GroupTag p={p} />{p.wechat_at && <span className="tag cy prm-wechat-tag" title={wechatTitle(p)}>已发到微信</span>}{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.handcards && <span className={`tag ${p.handcards.ok ? 'cy' : 'need'}`} title={p.handcards.ok ? 'Mac 做好的直播手卡附在这份草稿里：看过卡片再发（不会自动发）' : '手卡没做成：草稿里没附手卡，话不能原样发'}>{p.handcards.ok ? '手卡' : '手卡没做成'}</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>
@@ -343,19 +527,29 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           <Note kind="warn" icon={WarningCircle}>要特别注意{p.reason ? `：${p.reason}` : ''}</Note>
         )}
         {p.night_held && <div className="f-hint prm-night-held">{p.auto_mode ? '自动模式没有自动发' : '夜间没有自动发'}：{p.night_held}</div>}
+        {p.hold && <div className="f-hint prm-hold">要你看过再发：{p.hold}</div>}
+        {inGroup(p) && reachWhy(p) && <div className="f-hint prm-reach-why">发在群「{p.group_name || '（没有群名）'}」里：{reachWhy(p)}</div>}
         {p.status === 'pending' && p.auto_at && (
           <div className="f-hint prm-opening-auto">给新好友的第一句话：{fmtClock(p.auto_at)} 还没人处理就照原样自动发给她（设置里的「开场白没人处理多久自动发」）；要改的话在这之前发出。</div>
         )}
         {p.status === 'pending' && p.auto_held && <div className="f-hint prm-opening-held">这份不会自动发，等你：{p.auto_held}</div>}
-        {p.intent && <div><b>{p.opening || p.huopan ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
+        {p.status === 'pending' && p.unheard > 0 && (
+          <div className="row prm-unheard" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="f-hint">写好以后群里别人又说了 {p.unheard} 句，这份草稿没听到（别人说话已经自动重写过几次，不再自动重写）。</span>
+            <button type="button" className="btn sm" disabled={busy} onClick={() => act('redraft')}><ArrowClockwise />重新起草</button>
+          </div>
+        )}
+        {p.intent && <div><b>{p.opening || p.huopan || p.handcards?.console ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
         {!p.needs_attention && p.reason && <div className="dim"><b>依据：</b>{p.reason}</div>}
         {slots.length > 0 && (
           <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
             {slots.map(([k, v]) => <span key={k} className="tag">{k}：{v}</span>)}
           </div>
         )}
-        {pf && <PlatformBox pf={pf} />}
+        {pf && <PlatformBox pf={pf} files={p.operator_files} />}
+        {pf && <PhotoHeld p={p} macOnline={macOnline} onDone={onDone} />}
         {pf && <div className="f-hint">下面是平台上核验成功以后才发给达人的回复：</div>}
+        {kept != null && !editing && <div className="f-hint prm-kept-edit">上次「改了再执行」没排进 Mac 的任务队列，改过的回复还留着：点「改了再执行」接着用；直接点「批准并执行」发的是下面的原稿</div>}
         {editing
           ? <TextArea value={text} onChange={setText} rows={5} aria-label="修改要发的内容" />
           : <div className="prm-text" style={{ whiteSpace: 'pre-wrap' }}>{p.text || <span className="dim">（只发附件，没有文字）</span>}</div>}
@@ -369,6 +563,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {p.attachments.map((a) => <span key={a.name} className="tag"><Paperclip />{a.name} {fmtSize(a.size)}</span>)}
           </div>
         )}
+        {p.handcards && <HandcardsNote p={p} />}
         {p.status === 'executing' && (
           <Note kind="warn">平台执行中（Mac 任务 #{pf?.job_id ?? '—'}）：核验成功后自动把回复发给达人；没核验成功就不发，在页面上方标红。
             {pf?.lost_at ? ` Mac 从 ${fmtClock(pf.lost_at)} 起失联，等它回来；30 分钟还没回来就算结果未知。` : ''}</Note>
@@ -377,36 +572,39 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             {editing ? (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute} onClick={() => setExecuting(text)}><Lightning />确认并执行</button>
-                <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(p.text) }}>取消修改</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute || cardsExpired(p)} onClick={() => setExecuting(text)}><Lightning />确认并执行</button>
+                <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(kept ?? p.text) }}>取消修改</button>
               </>
             ) : (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute} onClick={() => setExecuting(undefined)}><Lightning />批准并执行</button>
-                <button type="button" className="btn" disabled={busy || !pf.can_execute} onClick={() => setEditing(true)}><PencilSimple />改了再执行</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute || cardsExpired(p)} onClick={() => setExecuting(undefined)}><Lightning />批准并执行</button>
+                <button type="button" className="btn" disabled={busy || !pf.can_execute || cardsExpired(p)} onClick={() => setEditing(true)}><PencilSimple />改了再执行</button>
                 <button type="button" className="btn" disabled={busy || pf.previewing || !pf.params.length} onClick={() => act('repreview')}><ArrowClockwise />重新预览</button>
                 <button type="button" className="btn ghost" disabled={busy} onClick={() => setDropping(true)}><X />不发</button>
               </>
             )}
             {!canSend && <span className="dim">机器人没连着微信，现在不能批准执行</span>}
             {canSend && !pf.can_execute && !pf.previewing && <span className="dim">预览没通过，不能执行；处理好以后点「重新预览」</span>}
+            {canSend && cardsExpired(p) && <span className="dim">{EXPIRED}</span>}
           </div>
         )}
         {!waiting && !pf && (
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             {editing ? (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => send('edit', text)}><PaperPlaneRight />确认发送</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => (cardsExpired(p) ? setTextOnly(text) : send('edit', text))}><PaperPlaneRight />确认发送</button>
                 <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(p.text) }}>取消修改</button>
               </>
             ) : (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => send('send')}><PaperPlaneRight />发送</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend || cardsFailed(p) || cardsExpired(p)} onClick={() => send('send')}><PaperPlaneRight />发送</button>
                 <button type="button" className="btn" disabled={busy} onClick={() => setEditing(true)}><PencilSimple />改了再发</button>
                 <button type="button" className="btn ghost" disabled={busy} onClick={() => setDropping(true)}><X />不发</button>
               </>
             )}
             {!canSend && <span className="dim">机器人没连着微信，现在发不出去</span>}
+            {canSend && cardsFailed(p) && <span className="dim">手卡没做成：改了再发，或者不发</span>}
+            {canSend && cardsExpired(p) && <span className="dim">{EXPIRED}：只能改了再发（不附手卡），或者不发</span>}
           </div>
         )}
       </div>
@@ -419,7 +617,14 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       {sending && (
         <Confirm title={`#${p.id} 发到群里？`} confirmLabel="发到群里" cancelLabel="再想想" busy={busy}
           onConfirm={() => act(sending.action, sending.text)} onCancel={() => setSending(null)}>
-          这条回复会发在老板拉的群「{p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。{parts > 1 ? `会分 ${parts} 条发。` : ''}
+          {p.group_manual ? `这条回复会发在群「${p.group_name || '（没有群名）'}」里，不是她的私聊：群里的人都看得到。`
+            : `这条回复会发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}{reachWhy(p)}{parts > 1 ? `会分 ${parts} 条发。` : ''}
+        </Confirm>
+      )}
+      {textOnly !== null && (
+        <Confirm title={TEXT_ONLY} confirmLabel="只发这段话" cancelLabel="再想想" busy={busy}
+          onConfirm={() => { const body = textOnly; setTextOnly(null); send('edit', body) }} onCancel={() => setTextOnly(null)}>
+          卡上的双11 那一行到 {p.handcards?.promo_until} 为止，已经过期：这次不附手卡，只发你改好的这段话（别再说手卡在这儿了）。要新的手卡就在合作单里再点「做手卡」。
         </Confirm>
       )}
       {executing !== null && pf && (
@@ -430,7 +635,8 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {pf.caveat && <div className="f-err">{pf.caveat}</div>}
             {pf.params.map((x) => <div key={x.label} className="f-hint">{x.label}：<span className="mono">{x.value}</span></div>)}
             <div>只执行一次，不会自动重试；平台读回核验成功（VERIFIED_SUCCESS）才把回复发给达人，否则不发，并在这一页上方标红。</div>
-            {group && <div>回复发在老板拉的群「{p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。</div>}
+            {group && <div>{p.group_manual ? `回复发在群「${p.group_name || '（没有群名）'}」里，不是她的私聊：群里的人都看得到。`
+              : `回复发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}{reachWhy(p)}</div>}
           </div>
         </Confirm>
       )}
@@ -560,7 +766,7 @@ function RecentCard({ d, onDone }) {
                 <tr key={p.id}>
                   <td className="num">#{p.id}</td>
                   <td>{p.party_name}</td>
-                  <td title={inGroup(p) ? `发在老板拉的群「${p.group_name || ''}」里` : undefined}>
+                  <td title={inGroup(p) ? `发在${p.group_manual ? '群' : '老板拉的群'}「${p.group_name || ''}」里` : undefined}>
                     {buyin ? `百应私信 · ${p.kind_label}` : inGroup(p) ? `群里 · ${p.kind_label}` : p.kind_label}
                   </td>
                   <td>

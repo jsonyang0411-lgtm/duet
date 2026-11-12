@@ -19,7 +19,8 @@ class StepCase(RouterCase):
 class OrderTests(StepCase):
     def test_the_chain_has_the_documented_order_and_unique_names(self):
         names = [step.name for step in S.ROUTE_STEPS]
-        assert names == ["self_message", "edge", "persist", "claude_relay", "prm", "admin_command", "silence"]
+        assert names == ["self_message", "edge", "wechat_review", "persist", "claude_relay", "prm", "admin_command",
+                         "silence"]
         assert len(set(names)) == len(names) and all(step.doc for step in S.ROUTE_STEPS)
 
     def test_the_last_step_always_ends_the_route_in_silence(self):
@@ -139,8 +140,52 @@ class TheServiceSteps(StepCase):
     def test_steps_without_their_service_pass_the_message_on(self):
         self.router()
         bare = SimpleNamespace(_config=SimpleNamespace(admin_wxid=ADMIN))
-        for step in (S.edge, S.claude_relay, S.prm):
+        for step in (S.edge, S.wechat_review, S.claude_relay, S.prm):
             assert step(RouteContext(router=bare, msg=private_msg("x", "你好"), trace=self.trace)) is None
+
+    def test_the_admins_answer_to_a_draft_notification_ends_the_route_before_it_is_stored(self):
+        """微信里审批草稿 (PRM_WECHAT_REVIEW): the review's answer is the reply, the message is not stored, the trace keeps
+        no words; a message it does not take goes on to be stored as before; the switch off: the step passes."""
+        review = MagicMock(on=True)
+        review.answer.side_effect = lambda msg, is_command=None: (
+            (True, "#12 已批准", None) if msg["content"] == "1" else (False, None, None))
+        router = self.router()
+        router._prm = SimpleNamespace(wechat_review=review, handle=lambda msg: False)
+        assert router.handle(admin_msg("w1", "1")) == "#12 已批准"
+        assert self.trace.notes["ended_by"] == "wechat_review" and self.trace.reasons[-1] == "wechat_review"
+        assert self.trace.redacted == "[管理员在微信里审批草稿，内容不记录]" and self.stored(router, "w1") == 0
+        assert router.handle(admin_msg("w2", "你好")) is None and self.stored(router, "w2") == 1
+        assert self.trace.notes["ended_by"] == "silence"
+        review.on = False
+        assert router.handle(admin_msg("w3", "1")) is None and self.stored(router, "w3") == 1
+        assert review.answer.call_count == 2
+        assert review.answer.call_args.kwargs["is_command"] == router._admin.is_command   # (a command is never an answer)
+
+    def test_the_lines_of_an_answer_that_are_no_answer_go_on_as_the_message(self):
+        """A merged burst of 「发 12」 and a cc task: the review's reply is said first, the cc line goes on to the later
+        steps as the message (no words of it in the trace)."""
+        review = MagicMock(on=True)
+        review.answer.return_value = (True, "#12 已批准", "cc 跑一下测试")
+        router = self.router()
+        router._prm = SimpleNamespace(wechat_review=review, handle=lambda msg: False)
+        ctx = self.ctx(router, admin_msg("w1", "发 12\ncc 跑一下测试", _burst_count=2))
+        assert S.wechat_review(ctx) is None
+        review.tell.assert_called_once_with("#12 已批准")
+        assert ctx.msg["content"] == "cc 跑一下测试" and ctx.msg["message_id"] == "w1"
+        assert self.trace.redacted == "[管理员在微信里审批草稿，内容不记录]"
+
+    def test_a_breaking_review_still_keeps_an_answer_from_the_relay(self):
+        review = MagicMock(on=True, answer=MagicMock(side_effect=RuntimeError("db locked")))
+        router = self.router()
+        router._prm = SimpleNamespace(wechat_review=review)
+        review.claims.return_value = True
+        assert S.wechat_review(self.ctx(router, admin_msg("w1", "发 12"))) == Stop(
+            "处理这条草稿回复时出错了（详见日志）：请在控制台处理")
+        assert review.claims.call_args.kwargs == {"is_command": router._admin.is_command}
+        review.claims.return_value = False
+        assert S.wechat_review(self.ctx(router, admin_msg("w2", "cc 跑测试"))) is None
+        review.claims.side_effect = RuntimeError("still locked")
+        assert S.wechat_review(self.ctx(router, admin_msg("w3", "发 12"))) is None
 
 
 class AdminCommands(StepCase):
@@ -169,8 +214,12 @@ class AdminCommands(StepCase):
         router = self.router(admin_wxid="")
         assert router.handle(private_msg("o1", "帮助", sender_id="")) is None
 
-    def test_the_handler_is_called_with_the_text_only(self):
+    def test_the_handler_is_called_with_the_text_and_the_message(self):
+        """The text stripped; the message itself beside it (合作单指令, PRM_WECHAT_COMMANDS: typed text only)."""
         admin = MagicMock(handle=MagicMock(return_value="好"))
         router = self.router(admin=admin)
-        assert router.handle(admin_msg("a1", "  查状态  ")) == "好"
-        admin.handle.assert_called_once_with("查状态")
+        msg = admin_msg("a1", "  查状态  ")
+        assert router.handle(msg) == "好"
+        admin.handle.assert_called_once()
+        assert admin.handle.call_args.args == ("查状态",)
+        assert admin.handle.call_args.kwargs["msg"]["message_id"] == "a1"

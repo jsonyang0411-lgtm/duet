@@ -22,6 +22,7 @@ from test_prm import CREATOR, Bot, Clock, config, draft
 from test_prm_lifecycle import own
 
 from src.config import BotConfig, _validate_config
+from src.prm import service as prm_service
 from src.prm.result import parse_draft
 from src.prm.service import (OPENING_AUTO_GRACE_SEC, OPENING_ROUTE, REPEAT_FILE_SEC, PrmService, ack_only,
                              snapshot)
@@ -201,6 +202,8 @@ def test_while_a_person_has_the_chat_it_waits(bot):
     ({"reply_draft": "你好呀～可以免费寄一顶给你试试～"}, "说到了「免费」"),
     ({"reply_draft": "你好呀～我们家帽子都包邮哦～"}, "说到了「包邮」"),
     ({"reply_draft": "你好呀～想送你一顶试戴～"}, "说到了「送你」"),
+    ({"reply_draft": "你好呀～看中的款可以寄几顶给您～"}, "说到了「寄几」"),
+    ({"reply_draft": "你好呀～样品邮费我们出～"}, "说到了「邮费」"),
     ({"reply_draft": "你好呀～合作佣金可以给到 30%～"}, "30%"),
     ({"reply_draft": "你好呀～我们没有坑位费～"}, "坑位"),
     ({"message_kind": "complaint"}, "投诉一律等运营"),
@@ -402,6 +405,18 @@ def test_which_lines_only_say_she_got_it():
 
 # ── the Mac's prompt ───────────────────────────────────────────────────────
 
+def test_a_first_line_may_say_samples_can_be_arranged_and_still_goes_by_itself(bot):
+    """2026-11-10, the user: an opening may say 「看中的款可以安排寄样给您试戴」; 寄样 / 样品 / 试戴 no longer hold it (a
+    promise still does: free, postage, a gift, how many, the cases above)."""
+    text = "老师您好～我是 ACE7CN 的运营，先把我们秋冬当季的货盘发您看看，看中哪几款可以安排寄样给您试戴～"
+    _, packet = opening(bot, first_line(text))
+    assert packet["status"] == "pending" and packet["meta"].get("auto_at") and "auto_held" not in packet["meta"]
+    assert wait(bot, MINUTES * 60 + 60) == 1
+    assert bot.texts and bot.texts[0][1] == text
+    for word in ("寄样", "样品", "试戴"):
+        assert word not in prm_service.OPENING_AUTO_WORDS
+
+
 @pytest.fixture
 def worker():
     spec = importlib.util.spec_from_file_location("claude_relay_worker_opening_auto", ROOT / "tools/claude_relay/worker.py")
@@ -413,7 +428,7 @@ def worker():
 def test_the_mac_hears_its_first_line_may_go_by_itself_and_which_pictures_she_got(worker):
     line = worker.opening_auto_line({"opening_auto": 30})
     assert line.startswith("这是我们给新好友的第一句话：运营 30 分钟内没处理，机器人就把你写的这份直接发给她")
-    assert "不许诺寄样" in line and "needs_attention" in line
+    assert "寄样只说到「看中的款可以安排寄样」" in line and "不报寄几顶" in line and "needs_attention" in line
     for odd in (None, 0, 1441, "30", True, 1.5):
         assert worker.opening_auto_line({"opening_auto": odd}) == ""
     job = {"id": 3, "text": "", "meta": {"opening": {"how": "requested", "by": "new_friend"}, "opening_auto": 30}}

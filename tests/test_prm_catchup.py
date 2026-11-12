@@ -158,6 +158,9 @@ class Run:
                               send=lambda chat, text: world.sent.append((chat, text)) or True,
                               on_parties_changed=self.backend.refresh_private_chats_soon)
         self.router._prm = self.prm
+        if self.prm.wechat_review.on:                       # (Bot._start_prm: 微信里审批草稿 hears what the bot sent)
+            self.backend.set_sent_hook(self.prm.wechat_review.note_sent)
+            self.backend.set_read_back_hook(self.prm.wechat_review.note_read_back)
         self.backend._client = world.wechat
         self.backend.set_private_filter(self.prm.is_party_chat)
         self.backend.set_own_message_hook(self.prm.on_own_message)

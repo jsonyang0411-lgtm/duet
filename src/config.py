@@ -318,6 +318,26 @@ class BotConfig:
     # Windows 报来的新好友认出平台（备注「抖音-昵称」、验证消息里有平台或昵称）才自动登记，抖音昵称在台账里恰好对上一位就关联她的抖音号。
     # 空 = 不读台账（只看备注和验证消息里的平台）。
     prm_invite_ledger: str = ""
+    # 微信里审批草稿 (2026-11-09, the user: away from the PC, they copied every draft into WeChat by hand): "on": every
+    # draft that waits for a person in 「待审批」 is also told once, as one message, to the admin's private chat
+    # (ADMIN_WXID; src/prm/wechat_review.py), and the admin answers there (quoting it: 1 send / 2 drop / 改 + their words;
+    # 「发 12」「不发 12」「改 12 …」), the same decision as the console's.  Never for what goes out by itself, a 百应 draft or
+    # a holding reply.  A platform action runs from WeChat only by 「执行」 quoting its notification (or 「执行 12」), only
+    # the preview that notification showed whole (one it could not list whole, whose 要注意 it cut, held for its photo
+    # check or for pictures that did not come stays the console's 批准并执行); 1 / 好 / 发 never run one, and its reply is
+    # edited in the console only.  A draft that changes after its notification (her recall, a new 要注意, group lines it
+    # did not hear) is told again (「#12 草稿（第 2 次通知）」); an answer to the older one does nothing.  On without
+    # ADMIN_WXID, or with a group's id or a registered creator's wxid in it, it does nothing (the console says why).
+    # "off" (the default): nothing of it.
+    prm_wechat_review: str = "off"
+    # 合作单指令 (src/prm/admin_commands.py, 2026-11-11): "on": in the admin's one-to-one chat (ADMIN_WXID) a typed line
+    # 「做手卡 <达人>」「补发货盘 <达人>」「写开场白 <达人>」「签收 <达人>」「备注 <达人> <文字>」「接管 <达人>」「副驾驶 <达人>」
+    # 「合作单 <达人>」 runs the console's deal button for her deal (found by her whole 称呼; a piece of it, or namesakes:
+    # listed first, 「选 N」), with its checks, and is answered in one line; 「指令」 lists them.  Nothing is sent to a
+    # creator by it: what a button makes (a draft job, a note, a stage, a mode) waits as when clicked (a 开场白 ordered
+    # here always waits for a person).  Not on the Mac's edge side.
+    # "off" (the default): nothing of it, every line goes where it went before.
+    prm_wechat_commands: str = "off"
     # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to
     # a person for this long: the creator's messages are only recorded meanwhile.
     prm_takeover_min: int = 120
@@ -364,6 +384,24 @@ class BotConfig:
     prm_sample_sync_min: int = 60
     prm_sample_waybill_days: int = 3
     prm_sample_sign_days: int = 10
+    # 签收后问一句 (2026-11-07, the user: 「可以加」): an order the sync above sees signed for in 聚水潭 (the bot's own, or one
+    # of ours made by hand whose waybill went into her deal) and she has not said she got it: one draft job asks her how
+    # the samples suit her (kb 场景 D2, 「聚水潭显示签收」), only inside PRM_SIGNED_HELLO_HOURS by this PC's clock (a
+    # signature outside waits for them).  By day its draft always waits in 待审批, whatever its kind's gate; in the
+    # night window or 自动模式 the night's rules judge it, like a reply draft's.  "off" (the default): nothing of it.
+    prm_signed_hello: str = "off"
+    prm_signed_hello_hours: str = "10:00-20:00"
+    # 直播手卡 (2026-11-09, the user: the bot makes the cards itself, a person still looks first): every WeChat draft job
+    # tells the Mac it may make cards when she asks for them (``meta.handcards_ok``; the Mac's handcards.json and the
+    # skill live-handcard make them, src/prm/handcards.py), and each deal has 「做手卡」.  A draft with cards always waits
+    # for a person.  "off" (the default): nothing of it.
+    prm_handcards: str = "off"
+    # 起草的上下文 (2026-11-09, PRM_DRAFT_CONTEXT): a creator's draft jobs carry ``meta.draft_context`` (the 聚水潭 sample
+    # orders her deal knows, her 抖音号 / 小红书号): the Mac reads her sample orders in 聚水潭 by them (<sample_status>),
+    # matches the pictures she sent against its hat photo index (<photo_matches>), and checks a draft's sample order by
+    # photo (a hat with no picture behind it is not ready; the side-by-side sheet shows on the draft, for the operators
+    # only).  "off" (the default): nothing of it, the Mac's prompts as before (src/prm/draft_context.py).
+    prm_draft_context: str = "off"
     # The 抖音百应 private messages (精选联盟私信) of the creators invited by 邀约带货: asked of the Mac once this many
     # minutes (0 = off, the default; the Mac's `dy buyin im-inbox`, read-only, is still to be written: until then the
     # console says it cannot be read).  A registered creator's new lines become a 百应 draft in 待审批 that an operator
@@ -400,6 +438,38 @@ class BotConfig:
     # What the Mac is told the boss is called (1-10 characters): the boss's names (PRM_GROUP_WITH) never leave this PC;
     # a group job says this instead (its ``meta.group.boss``, and in the group's name and the lines it is told).
     prm_boss_call: str = "老板"
+    # 接手任何合作群 (「接群」, decision 2026-11-10): "off" (the default): a draft for a group an operator linked by hand
+    # always waits for a person (no kind gate, 下班时段, 自动模式, 开场白自动发 or 签收后问一句 sends one: everybody in the
+    # group reads it).  "on": such a group's drafts go by them as a 老板拉的群's do, but for the first one of the lines
+    # that waited at 接群 (it always waits).
+    prm_linked_groups_auto: str = "off"
+    # 群自己接上 (src/prm/boss_groups.py ``auto_scan``, 2026-11-11): "on": every group chat of this account with at most
+    # prm_boss_group_max members, old ones too, is looked at by the scan: exactly one member is an active registered
+    # creator (no other linked group of hers) -> the group is linked to her deal as a link by hand is (no 开场白, the
+    # talk there its context, one draft when her side waits, and that one always waits for a person), the admin is told
+    # once in WeChat; two or more registered creators -> the console asks, the admin is told once; none -> nothing, and
+    # one WeChat line for a group that appeared or was active after the switch first ran.  A group a person stopped or
+    # refused is never linked by it.  "off" (the default): nothing of it.  Needs PRM_COPILOT=on.
+    prm_groups_auto_link: str = "off"
+    # 她那边的人 (PrmService._group_message, 2026-11-11): "on": in a linked group (a 老板拉的群, one linked by hand or by
+    # the scan) of at most prm_boss_group_max members, a line of a member who is not ours (us, a boss, the admin, a cc
+    # user) nor another registered creator is
+    # drafted as her own line is (her assistant, her 商务: the same job, gates, 下班时段, 自动模式), marked 〔她那边的人〕
+    # for the Mac (never that person's name).  "off" (the default): such a line is context only, as before.
+    prm_group_her_side: str = "off"
+    # 发在她那边最近说话的地方 (PrmService._reaching, 2026-11-11): "on": what the bot starts itself (a shipping notice, a
+    # 专属佣金 / 专属链接 step, the console's 开场白, 补发货盘 and 做手卡, 签收后问一句) goes to a linked group she is still in
+    # (one the bot drafts in, never a read-only 三方群) when the latest line of her side on the deal (hers; with
+    # prm_group_her_side on her side's other people's too) was in that group, even when she has a private chat with us;
+    # her latest line in private, or none: as before.  Decided when the message is made.  "off" (the default): her private
+    # chat when she has one, else the group, as before.
+    prm_reach_last_spoke: str = "off"
+    # 我们自己的人 (src/prm/boss_groups.py, 2026-11-11): the names of our own people (colleagues) in creators' groups, by
+    # their names in this account's contacts (their 备注), comma-separated, at most 10 (this PC's .env only, never the
+    # repo), resolved as PRM_GROUP_WITH's bosses are: never "who is she" (the scan, 接群, the boss scan), never her side
+    # (prm_group_her_side), their lines context.  A name no one contact has: the console warns and no group is linked or
+    # taken over by itself until it is put right.  "" (the default) = none.
+    prm_group_ours: str = ""
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -564,6 +634,11 @@ def _validate_config(kwargs: dict) -> None:
     # turning the copilot off in a hurry must not stop the bot from starting.)
     if kwargs.get("prm_auto_register", "off") not in ("off", "on"):
         errors.append(f"PRM_AUTO_REGISTER must be off or on, got {kwargs.get('prm_auto_register')}")
+    # (on without ADMIN_WXID it only does nothing: 「待审批」 says why.  Not refused, as PRM_BOSS_GROUPS is not.)
+    if kwargs.get("prm_wechat_review", "off") not in ("off", "on"):
+        errors.append(f"PRM_WECHAT_REVIEW must be off or on, got {kwargs.get('prm_wechat_review')}")
+    if kwargs.get("prm_wechat_commands", "off") not in ("off", "on"):
+        errors.append(f"PRM_WECHAT_COMMANDS must be off or on, got {kwargs.get('prm_wechat_commands')}")
     if not (5 <= int(kwargs.get("prm_takeover_min", 120)) <= 1440):
         errors.append(f"PRM_TAKEOVER_MIN must be between 5 and 1440, got {kwargs.get('prm_takeover_min')}")
     if not (0 <= int(kwargs.get("prm_holding_min", 10)) <= 120):
@@ -600,6 +675,20 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_SAMPLE_WAYBILL_DAYS must be between 1 and 30, got {kwargs.get('prm_sample_waybill_days')}")
     if not (1 <= int(kwargs.get("prm_sample_sign_days", 10)) <= 60):
         errors.append(f"PRM_SAMPLE_SIGN_DAYS must be between 1 and 60, got {kwargs.get('prm_sample_sign_days')}")
+    if kwargs.get("prm_signed_hello", "off") not in ("off", "on"):
+        errors.append(f"PRM_SIGNED_HELLO must be off or on, got {kwargs.get('prm_signed_hello')}")
+    if kwargs.get("prm_handcards", "off") not in ("off", "on"):
+        errors.append(f"PRM_HANDCARDS must be off or on, got {kwargs.get('prm_handcards')}")
+    if kwargs.get("prm_draft_context", "off") not in ("off", "on"):
+        errors.append(f"PRM_DRAFT_CONTEXT must be off or on, got {kwargs.get('prm_draft_context')}")
+    hello_hours = str(kwargs.get("prm_signed_hello_hours", "10:00-20:00") or "").strip()
+    if hello_hours:                                    # (empty: the default, 10:00-20:00)
+        from src.prm.gates import night_window
+
+        try:
+            night_window(hello_hours)
+        except ValueError:
+            errors.append(f"PRM_SIGNED_HELLO_HOURS must be HH:MM-HH:MM (like 10:00-20:00), got {hello_hours}")
     buyin_min = int(kwargs.get("prm_buyin_sync_min", 0))
     if not (buyin_min == 0 or 5 <= buyin_min <= 1440):
         errors.append(f"PRM_BUYIN_SYNC_MIN must be 0 (off) or between 5 and 1440, got {kwargs.get('prm_buyin_sync_min')}")
@@ -635,6 +724,20 @@ def _validate_config(kwargs: dict) -> None:
     boss_call = " ".join(str(kwargs.get("prm_boss_call", "老板") or "").split())
     if not 1 <= len(boss_call) <= 10:
         errors.append(f"PRM_BOSS_CALL must be 1 to 10 characters, got {len(boss_call)}")
+    if kwargs.get("prm_linked_groups_auto", "off") not in ("off", "on"):
+        errors.append(f"PRM_LINKED_GROUPS_AUTO must be off or on, got {kwargs.get('prm_linked_groups_auto')}")
+    if kwargs.get("prm_groups_auto_link", "off") not in ("off", "on"):
+        errors.append(f"PRM_GROUPS_AUTO_LINK must be off or on, got {kwargs.get('prm_groups_auto_link')}")
+    if kwargs.get("prm_group_her_side", "off") not in ("off", "on"):
+        errors.append(f"PRM_GROUP_HER_SIDE must be off or on, got {kwargs.get('prm_group_her_side')}")
+    ours_names = [" ".join(n.split()) for n in re.split(r"[,，、;；]", str(kwargs.get("prm_group_ours", "") or ""))
+                  if n.strip()]
+    if len(ours_names) > 10 or len(set(ours_names)) != len(ours_names):
+        errors.append("PRM_GROUP_OURS must name at most 10 different people (comma-separated)")
+    elif any(len(n) > 20 or not any(ch.isalnum() for ch in n) for n in ours_names):
+        errors.append("PRM_GROUP_OURS: each name must be 1-20 characters with a letter, a digit or a Chinese character")
+    if kwargs.get("prm_reach_last_spoke", "off") not in ("off", "on"):
+        errors.append(f"PRM_REACH_LAST_SPOKE must be off or on, got {kwargs.get('prm_reach_last_spoke')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -767,6 +870,8 @@ def load_config() -> BotConfig:
         "prm_copilot": _parse_switch(os.getenv("PRM_COPILOT", "off")),
         "prm_db": os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db",
         "prm_auto_register": _parse_switch(os.getenv("PRM_AUTO_REGISTER", "off")),
+        "prm_wechat_review": _parse_switch(os.getenv("PRM_WECHAT_REVIEW", "off")),
+        "prm_wechat_commands": _parse_switch(os.getenv("PRM_WECHAT_COMMANDS", "off")),
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回您").strip() or "收到，我确认一下马上回您",
@@ -783,6 +888,10 @@ def load_config() -> BotConfig:
         "prm_sample_sync_min": int(os.getenv("PRM_SAMPLE_SYNC_MIN", "60")),
         "prm_sample_waybill_days": int(os.getenv("PRM_SAMPLE_WAYBILL_DAYS", "3")),
         "prm_sample_sign_days": int(os.getenv("PRM_SAMPLE_SIGN_DAYS", "10")),
+        "prm_signed_hello": _parse_switch(os.getenv("PRM_SIGNED_HELLO", "off")),
+        "prm_signed_hello_hours": os.getenv("PRM_SIGNED_HELLO_HOURS", "").strip() or "10:00-20:00",
+        "prm_handcards": _parse_switch(os.getenv("PRM_HANDCARDS", "off")),
+        "prm_draft_context": _parse_switch(os.getenv("PRM_DRAFT_CONTEXT", "off")),
         "prm_buyin_sync_min": int(os.getenv("PRM_BUYIN_SYNC_MIN", "0")),
         "prm_friend_add": _parse_switch(os.getenv("PRM_FRIEND_ADD", "off")),
         "prm_friend_add_daily_max": int(os.getenv("PRM_FRIEND_ADD_DAILY_MAX", "10")),
@@ -795,6 +904,11 @@ def load_config() -> BotConfig:
         "prm_boss_groups": _parse_switch(os.getenv("PRM_BOSS_GROUPS", "off")),
         "prm_boss_group_max": int(os.getenv("PRM_BOSS_GROUP_MAX", "6")),
         "prm_boss_call": " ".join(os.getenv("PRM_BOSS_CALL", "").split()) or "老板",
+        "prm_linked_groups_auto": _parse_switch(os.getenv("PRM_LINKED_GROUPS_AUTO", "off")),
+        "prm_groups_auto_link": _parse_switch(os.getenv("PRM_GROUPS_AUTO_LINK", "off")),
+        "prm_group_her_side": _parse_switch(os.getenv("PRM_GROUP_HER_SIDE", "off")),
+        "prm_reach_last_spoke": _parse_switch(os.getenv("PRM_REACH_LAST_SPOKE", "off")),
+        "prm_group_ours": os.getenv("PRM_GROUP_OURS", "").strip(),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),
