@@ -108,14 +108,29 @@ APPLY_WORDS = ("标签", "权限", "朋友圈", "仅聊天", "不让", "不看",
 APPLY_LANDMARKS = ("发送添加朋友申请", *REMARK_LABELS, "标签", "朋友权限", "设置朋友权限", "确定", "取消")
 REMARK_MAX_CHARS = 32
 # 三方群 (src/prm/three_party.py, 2026-10-30): a group of this account and a few contacts, made through WeChat 4.0's (+)
-# menu → 「发起群聊」 → its contact picker, a window of its own.  Neither the menu item's place nor the picker's title or
-# layout was read on a real machine yet, so the item is found by OCR (by its place, the menu's top one, only when OCR
-# reads nothing of the menu; the window that opens must then carry one of the picker's own titles) and in the picker
-# nothing is clicked that OCR does not read: its search box (「搜索」), each member's one row reading exactly that name in
-# the list (its left part), 「完成」.  Before 「完成」 what is picked (its right part) is read back: exactly the members.
+# menu → 「发起群聊」 → its contact picker, a window of its own.  Neither the menu item's place nor the picker's layout
+# was read on a real machine yet, so the item is found by OCR (by its place, the menu's top one, only when OCR reads
+# nothing of the menu) and in the picker nothing is clicked that OCR does not read: its search box (「搜索」), each
+# member's one row reading exactly that name in the list (its left part), 「完成」.  Before 「完成」 what is picked (its
+# right part) is read back: exactly the members.
+# The picker is a window that appears after the click on the item: titled one of GROUP_PICKER_TITLES (2026-11-12: every
+# run on the real PC ended in no_picker because its title, 「微信发起群聊」, was not among them), or any new window of
+# WeChat's whose OCR shows a search box and 「完成」 (for builds that title it otherwise; with the item clicked by its
+# place, not one titled plainly 「微信」, which may be the add-friend window).  It is waited for longer
+# (GROUP_PICKER_LOOKS), the item is clicked once more when nothing opened and the menu is still there
+# (GROUP_RECLICK_LOOK), and when there is none one log line says what was seen (each new window's class, size and kind
+# of title, never its text).
 GROUP_MENU_LABELS = ("发起群聊",)
-GROUP_PICKER_TITLES = ("发起群聊", "选择联系人", "创建群聊")
+# 「微信发起群聊」: the picker's title as read on the real machine (Windows, WeChat 4.1, 2026-11-12: a new top-level
+# window, class Qt51514QWindowIcon, 794 x 610); the other three are guesses kept for other builds.
+GROUP_PICKER_TITLES = ("微信发起群聊", "发起群聊", "选择联系人", "创建群聊")
 GROUP_MENU_ITEM_Y = 0.17          # 「发起群聊」 in the (+) menu: the top of its three items (添加朋友 is at 0.51)
+GROUP_PICKER_LOOKS = 30           # the picker is looked for this many times, 0.1 s apart (about 3 s after the click)
+GROUP_RECLICK_LOOK = 2            # at this look (0.3 + 2 × 0.1 = 0.5 s after the click) no new window and the (+) menu
+                                  # still open: the item is clicked once more (once only)
+GROUP_PICKER_MIN_PX = 300         # a window taken for the picker by what it shows is at least this wide and this high
+GROUP_CONTENT_TRIES = 2           # such a window is read (OCR, nothing clicked) at most this many times,
+GROUP_CONTENT_GAP = 5             # this many looks apart (it may not be drawn yet the first time)
 GROUP_SPLIT_X = 0.5               # a picker row whose centre is left of this is in the list, else among the picked
 GROUP_DONE = re.compile(r"(完成|确定)([(（]\d+[)）])?")
 GROUP_PICKER_WORDS = ("搜索", "完成", "取消", "确定", "发起群聊", "选择联系人", "创建群聊", "已选择", "联系人", "请勾选",
@@ -1397,9 +1412,9 @@ class FriendManager:
         「完成」 read before anything is typed, each member picked (``_pick_member``), the picked ones read back (every
         member, nobody else: ``_extra_pick``), then 「完成」 once and the picker must close.  The picker is closed
         whenever it stops before that."""
-        picker = self._open_group_picker_wechat4(hwnd)
+        picker, why = self._open_group_picker_wechat4(hwnd)
         if not picker:
-            return _group_failure("no_picker", "没打开微信的「发起群聊」窗口，什么也没勾，没有建群")
+            return _group_failure("no_picker", "没打开微信的「发起群聊」窗口，什么也没勾，没有建群" + why)
         try:
             self._focus_window(picker)
             rows = self._capture_ocr(picker)
@@ -1506,22 +1521,25 @@ class FriendManager:
             return _group_failure("not_picked", f"点了「{member}」，已选的人里没读到，已关掉，没有建群")
         return None
 
-    def _open_group_picker_wechat4(self, main_hwnd: int) -> int | None:
-        """WeChat 4.0's 「发起群聊」 window: the (+) menu (``_plus_menu``), its 「发起群聊」 clicked where OCR reads it (a
-        menu read without it is closed; one OCR reads nothing of is clicked at the item's place, GROUP_MENU_ITEM_Y),
-        and the window that appears after the click titled exactly one of GROUP_PICKER_TITLES (with the item read,
-        plainly 「微信」 / 「Weixin」 too), never a chat's name.  An add-friend window that opened instead is closed.
-        None when there is no picker."""
+    def _open_group_picker_wechat4(self, main_hwnd: int) -> tuple[int | None, str]:
+        """WeChat 4.0's 「发起群聊」 window, and when there is none why not (a clause for the operator's message, "" when
+        it is found): the (+) menu (``_plus_menu``), its 「发起群聊」 clicked where OCR reads it (a menu read without it
+        is closed; one OCR reads nothing of is clicked at the item's place, GROUP_MENU_ITEM_Y), then GROUP_PICKER_LOOKS
+        looks, 0.1 s apart, for a window that appeared after the click and is not a chat's name: titled exactly one of
+        GROUP_PICKER_TITLES (with the item read, a dialog titled plainly 「微信」 / 「Weixin」 too), or showing the
+        picker's search box and 「完成」 (``_picker_by_content``).  Nothing new at GROUP_RECLICK_LOOK and the menu still
+        open: the item is clicked once more, once.  No picker: one log line says what was seen (``_picker_miss``); an
+        add-friend window that opened instead is closed, any other new window is left alone."""
         if sys.platform != "win32":
-            return None
+            return None, ""
         _safe_ensure_default_desktop()
         import win32gui
         before = self._window_snapshot(main_hwnd)
         if before is None:
-            return None
+            return None, "（列不出微信的窗口，什么也没点）"
         menu_hwnd = self._plus_menu(main_hwnd)
         if not menu_hwnd:
-            return None
+            return None, "（点了「+」，菜单没有出来）"
         left, top, right, bottom = win32gui.GetWindowRect(menu_hwnd)
         rows = self._capture_ocr(menu_hwnd)
         item = _menu_item(rows, *GROUP_MENU_LABELS)
@@ -1532,32 +1550,151 @@ class FriendManager:
             logger.info("Friend management: the (+) menu was read without 「发起群聊」 (read: %s); nothing clicked",
                         ", ".join(_label_text(r) for r in rows[:6]))
             self._dismiss(main_hwnd)
-            return None
+            return None, "（「+」菜单里没认出「发起群聊」这一项，什么也没点）"
         else:
             x, y = left + int(0.5 * (right - left)), top + int(GROUP_MENU_ITEM_Y * (bottom - top))
         self._foreground(main_hwnd)
         if not self._clicker(x, y):
-            return None
+            return None, "（菜单上的那一项没点上）"
         self._sleep(0.3)
-        for look in range(DIALOG_LOOKS):
+        looked: dict[int, dict] = {}                     # what _picker_by_content read in each new window
+        again = False
+        for look in range(GROUP_PICKER_LOOKS):
+            how = "its title"
             picker = self._find_new_dialog(main_hwnd, before, GROUP_PICKER_TITLES, exclude=(menu_hwnd,))
             if picker is None and item is not None:      # the item was read: a new dialog titled plainly 「微信」 too
                 picker = self._find_new_dialog(main_hwnd, before, GENERIC_DIALOG_TITLES, cls=DIALOG_CLASS,
                                                exclude=(menu_hwnd,))
+            if picker is None:
+                how = "what it shows"
+                picker = self._picker_by_content(main_hwnd, before, menu_hwnd, item is not None, looked, look)
             if picker:
-                return picker
-            if look + 1 < DIALOG_LOOKS:
+                logger.info("Friend management: the 「发起群聊」 window was found by %s at look %d%s", how, look + 1,
+                            " (after a second click)" if again else "")
+                return picker, ""
+            if (look == GROUP_RECLICK_LOOK and not self._new_windows(main_hwnd, before, menu_hwnd)
+                    and self._is_window_visible(menu_hwnd)):
+                logger.info("Friend management: nothing opened after the click on 「发起群聊」 and the (+) menu is still "
+                            "open: clicked once more")
+                again = True
+                self._foreground(main_hwnd)
+                if not self._clicker(x, y):
+                    logger.info("Friend management: the second click on 「发起群聊」 was not delivered")
+            if look + 1 < GROUP_PICKER_LOOKS:
                 self._sleep(0.1)
-        logger.info("Friend management: no 「发起群聊」 window appeared after the click on 「发起群聊」 (%s)",
-                    "read in the menu" if item is not None else "the menu's top item, OCR read nothing of the menu")
+        return None, self._picker_miss(main_hwnd, before, menu_hwnd, (left, top, right, bottom), item is not None,
+                                       again, looked)
+
+    def _new_windows(self, main_hwnd: int, before: set, menu_hwnd: int) -> list[int]:
+        """WeChat's visible windows that were not there before the click (``before``), the (+) menu aside; [] when
+        they cannot be listed."""
         try:
-            for h in self._process_windows(main_hwnd):
-                if h not in before and str(win32gui.GetWindowText(h) or "").strip() in ADD_DIALOG_TITLES:
-                    logger.info("Friend management: the add-friend window opened instead of 「发起群聊」; closed")
-                    self._close_window(h)
+            return [h for h in self._process_windows(main_hwnd) if h not in before and h != menu_hwnd]
         except Exception:
-            logger.debug("Friend management: the windows after 「发起群聊」 could not be looked at", exc_info=True)
+            logger.debug("Friend management: WeChat's windows could not be listed", exc_info=True)
+            return []
+
+    def _title_kind(self, title: str) -> str:
+        """What a window's title is, for the log (never its text: a chat's title is somebody's name): ``empty``,
+        ``chat`` (a chat's name), ``generic`` (「微信」 / 「Weixin」), ``known`` (the picker's, one of the add-friend
+        dialogs'), else ``other(<n> chars)``."""
+        title = str(title or "").strip()
+        if not title:
+            return "empty"
+        if self._is_chat_title(title):
+            return "chat"
+        if title in GENERIC_DIALOG_TITLES:
+            return "generic"
+        if title in (*GROUP_PICKER_TITLES, *ADD_DIALOG_TITLES, *APPLY_DIALOG_TITLES, *ACCEPT_DIALOG_TITLES):
+            return "known"
+        return f"other({len(title)} chars)"
+
+    def _picker_by_content(self, main_hwnd: int, before: set, menu_hwnd: int, generic_ok: bool, looked: dict,
+                           look: int) -> int | None:
+        """A window that appeared after the click on 「发起群聊」 and shows the picker's search box
+        (``_is_search_placeholder``) and 「完成」 (``_group_done``), whatever its title and class: not the menu, at least
+        GROUP_PICKER_MIN_PX wide and high, titled neither like a chat nor like one of the add-friend dialogs, nor
+        plainly 「微信」 / 「Weixin」 unless the item was read (``generic_ok``; clicked by its place, the add-friend
+        window, which some builds title so, may have opened).  Each window is only pictured and read (OCR: nothing is
+        clicked, typed or closed), at most GROUP_CONTENT_TRIES times, GROUP_CONTENT_GAP looks apart; ``looked`` keeps
+        what was read in it (``_picker_miss`` logs it)."""
+        import win32gui
+        for h in self._new_windows(main_hwnd, before, menu_hwnd):
+            seen = looked.setdefault(h, {"tries": 0, "at": 0, "search": False, "done": False})
+            if seen["tries"] >= GROUP_CONTENT_TRIES or (seen["tries"] and look - seen["at"] < GROUP_CONTENT_GAP):
+                continue
+            try:
+                title = str(win32gui.GetWindowText(h) or "").strip()
+                cls = str(win32gui.GetClassName(h) or "")
+                wl, wt, wr, wb = win32gui.GetWindowRect(h)
+            except Exception:                            # gone meanwhile
+                continue
+            if (wr - wl < GROUP_PICKER_MIN_PX or wb - wt < GROUP_PICKER_MIN_PX
+                    or title in (*ADD_DIALOG_TITLES, *APPLY_DIALOG_TITLES, *ACCEPT_DIALOG_TITLES)
+                    or (title in GENERIC_DIALOG_TITLES and not generic_ok) or self._is_chat_title(title)):
+                continue
+            seen["tries"] += 1
+            seen["at"] = look
+            rows = self._capture_ocr(h)
+            seen["search"] = any(_is_search_placeholder(r.get("t", "")) for r in rows)
+            seen["done"] = _group_done(rows) is not None
+            if seen["search"] and seen["done"]:
+                logger.info("Friend management: a new WeChat window (%s, %dx%d, title %s) shows a 搜索 box and 完成: "
+                            "taken for 「发起群聊」", cls, wr - wl, wb - wt, self._title_kind(title))
+                return h
         return None
+
+    def _picker_miss(self, main_hwnd: int, before: set, menu_hwnd: int, menu_rect: tuple, item_read: bool,
+                     again: bool, looked: dict) -> str:
+        """No 「发起群聊」 window after the wait: ONE log line with what was seen (the item read or clicked by its place,
+        a second click, the menu still open at the end, every new window of WeChat's — class, size, kind of title
+        (``_title_kind``, never its text), what ``_picker_by_content`` read in it — and from one OCR of the main window
+        whether it reads 「发起群聊」, a search box and 完成 / 确定: a picker drawn inside it), then the clause for the
+        operator's message.  An add-friend window that opened instead is closed; every other window is left alone."""
+        import win32gui
+        fresh = self._new_windows(main_hwnd, before, menu_hwnd)
+        described, add_friend = [], []
+        for h in fresh:
+            try:
+                title = str(win32gui.GetWindowText(h) or "").strip()
+                wl, wt, wr, wb = win32gui.GetWindowRect(h)
+                text = f"{win32gui.GetClassName(h)} {wr - wl}x{wb - wt} title {self._title_kind(title)}"
+            except Exception:
+                described.append("(could not be looked at)")
+                continue
+            read = looked.get(h) or {}
+            if read.get("tries"):
+                text += (f" read {read['tries']}x: 搜索 {'yes' if read['search'] else 'no'}, "
+                         f"完成 {'yes' if read['done'] else 'no'}")
+            described.append(text)
+            if title in ADD_DIALOG_TITLES:
+                add_friend.append(h)
+        menu_open = self._is_window_visible(menu_hwnd)
+        rows = self._capture_ocr(main_hwnd)
+        main_item = _menu_item(rows, *GROUP_MENU_LABELS) is not None
+        main_search = any(_is_search_placeholder(r.get("t", "")) for r in rows)
+        main_done = _group_done(rows) is not None
+        logger.info("Friend management: no 「发起群聊」 window appeared after the click on 「发起群聊」 (item: %s; second "
+                    "click: %s; the (+) menu (%dx%d) still open at the end: %s; new WeChat windows: %s; the main window "
+                    "reads 「发起群聊」 %s, a 搜索 box %s, 完成/确定 %s)",
+                    "read in the menu" if item_read else "the menu's top item, OCR read nothing of the menu",
+                    "yes" if again else "no", menu_rect[2] - menu_rect[0], menu_rect[3] - menu_rect[1],
+                    "yes" if menu_open else "no", "; ".join(described) or "none",
+                    "yes" if main_item else "no", "yes" if main_search else "no", "yes" if main_done else "no")
+        for h in add_friend:
+            logger.info("Friend management: the add-friend window opened instead of 「发起群聊」; closed")
+            self._close_window(h)
+        did = ("" if item_read else "菜单上的字没认出来，") + ("点了两次" if again else "点了") + \
+              ("「发起群聊」" if item_read else "最上面一项")
+        if add_friend:
+            return f"（{did}，打开的却是「添加朋友」，已关掉）"
+        if menu_open:
+            return f"（{did}，菜单没有关）"
+        if main_item and main_done:
+            return f"（{did}，选人的界面像是开在微信主窗口里，机器人还不会在那里选人）"
+        if fresh:
+            return f"（{did}，出现了 {len(fresh)} 个认不出的窗口，没有动它们）"
+        return f"（{did}以后什么窗口也没出现）"
 
 
 def _group_done(rows: list[dict]) -> dict | None:

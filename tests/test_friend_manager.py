@@ -2198,8 +2198,14 @@ class CreateGroupTests(DialogTestCase):
                 final if final is not None else [self.BOX, row("已选择2个联系人", 0.55, 0.05, 0.85, 0.08), pa, pb,
                                                  self.DONE, self.CANCEL]]
 
-    def create(self, screens, members=("老板测试", "小美测试"), *, dry_run=False, done_closes=True, item_opens=None):
-        manager = self.make(FakeOcr(*screens))
+    def create(self, screens, members=("老板测试", "小美测试"), *, dry_run=False, done_closes=True, item_opens=None,
+               opens_on=1, sleep=None):
+        """One create_group run.  ``opens_on``: the click that opens the picker (1: the first one on the menu item; 2:
+        the second, the first one did nothing and the menu stayed).  ``sleep``: the manager's sleeper (a fake clock)."""
+        self.ocr = FakeOcr(*screens)
+        manager = self.make(self.ocr)
+        if sleep is not None:
+            manager._sleep = sleep
         self.closed = []
         manager._close_window = lambda h: self.closed.append(h) or self.desktop.windows.pop(h, None)
         manager._is_window_visible = lambda h: h in self.desktop.windows
@@ -2211,8 +2217,8 @@ class CreateGroupTests(DialogTestCase):
         def done():
             if done_closes:
                 self.desktop.windows.pop(PICKER, None)                     # WeChat makes the group, the picker goes
-        self.desktop.on_click = [lambda: self.desktop.add(MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 210, 300)),
-                                 open_picker] + [lambda: None] * 4 + [done]
+        self.desktop.on_click = ([lambda: self.desktop.add(MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 210, 300))]
+                                 + [lambda: None] * (opens_on - 1) + [open_picker] + [lambda: None] * 4 + [done])
         self.desktop.clicks = 0
         return self.run_win32(lambda: manager.create_group(list(members), dry_run=dry_run))
 
@@ -2322,6 +2328,7 @@ class CreateGroupTests(DialogTestCase):
         screens[0] = [row("添加朋友", 0.2, 0.1, 0.8, 0.4), row("新建笔记", 0.2, 0.6, 0.8, 0.9)]
         result = self.create(screens)
         self.assertEqual(result["reason"], "no_picker")
+        self.assertIn("没有建群（「+」菜单里没认出「发起群聊」这一项，什么也没点）", result["message"])
         self.assertEqual(self.clicks_on(), [(280, 56)])
         self.assertIn(("key", VK_ESCAPE, "front", HWND), self.events)      # the menu is closed
 
@@ -2339,6 +2346,179 @@ class CreateGroupTests(DialogTestCase):
                 self.assertEqual(len(self.clicks_on()), 2)
                 self.assertEqual(self.window.pasted, [])
                 self.assertEqual(self.closed, [OTHER] if title == "添加朋友" else [])
+                self.assertIn("（菜单上的字没认出来，点了最上面一项，" + ("打开的却是「添加朋友」，已关掉）" if title == "添加朋友"
+                                                                 else "出现了 1 个认不出的窗口，没有动它们）"),
+                              result["message"])
+                self.assertEqual(self.ocr.hwnds, [MENU, HWND], "the new window is not read: only its title counts")
+
+    # ── 2026-11-12: the real PC's 4.1 never showed a window titled like the picker ──
+
+    MENU_ITEM = (10 + int(0.5 * 200), 60 + int((0.08 + 0.25) / 2 * 240))  # 「发起群聊」 of MENU_ROWS, the menu 200 x 240
+
+    def miss_line(self, logs):
+        """The one log line of a run that found no picker."""
+        lines = [line for line in logs.output if "no 「发起群聊」 window appeared" in line]
+        self.assertEqual(len(lines), 1, logs.output)
+        return lines[0]
+
+    def test_the_pickers_title_read_on_the_real_pc_is_taken_by_its_title(self):
+        """Real PC 2026-11-12 (WeChat 4.1): the picker is a new top-level window titled exactly 「微信发起群聊」, class
+        Qt51514QWindowIcon, 794 x 610; every run ended in no_picker while that title was not among the picker's."""
+        rect = (300, 100, 1094, 710)                                       # 794 x 610
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                self.setUp()
+                with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+                    result = self.create(self.flow(), dry_run=dry_run, item_opens=lambda: self.desktop.add(
+                        PICKER, cls=FakeDesktop.DIALOG_CLASS, title="微信发起群聊", rect=rect))
+                self.assertEqual(result["ok"], True, result)
+                self.assertIn("found by its title at look 1", "\n".join(logs.output))
+                self.assertEqual(self.ocr.hwnds[:2], [MENU, PICKER])      # no read to recognise it: its title did
+                self.assertEqual(self.clicks_on()[:4], [(280, 56), self.MENU_ITEM, self.at(self.BOX, rect),
+                                                        self.at(self.listed("老板测试"), rect)])
+                self.assertEqual(self.window.pasted, ["老板测试", "小美测试"])
+                if dry_run:
+                    self.assertEqual(self.closed, [PICKER])               # 「先试一下」: closed, 完成 never clicked
+                    self.assertNotIn(self.at(self.DONE, rect), self.clicks_on())
+                else:
+                    self.assertEqual(self.clicks_on()[-1], self.at(self.DONE, rect))
+                    self.assertEqual(self.closed, [])
+
+    def test_a_picker_of_another_title_and_class_is_recognised_by_what_it_shows(self):
+        """A new window of WeChat's showing a 搜索 box and 完成 is the picker, whatever its title and class; it is only
+        read (OCR) before it is used, and 「先试一下」 still closes it without 完成."""
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                self.setUp()
+                screens = self.flow()
+                screens.insert(1, self.EMPTY)                                 # read once while it is waited for
+                with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+                    result = self.create(screens, dry_run=dry_run, item_opens=lambda: self.desktop.add(
+                        PICKER, cls="Qt51514QWindow", title="选择群成员", rect=self.PICKER_RECT))
+                self.assertEqual(result["ok"], True, result)
+                self.assertEqual(self.ocr.hwnds[:3], [MENU, PICKER, PICKER])
+                self.assertEqual(self.clicks_on()[:3], [(280, 56), self.MENU_ITEM, self.at(self.BOX)])
+                self.assertEqual(self.window.pasted, ["老板测试", "小美测试"])
+                text = "\n".join(logs.output)
+                self.assertIn("(Qt51514QWindow, 800x700, title other(5 chars)) shows a 搜索 box and 完成", text)
+                self.assertNotIn("选择群成员", text)
+                if dry_run:
+                    self.assertEqual(self.closed, [PICKER])
+                    self.assertNotIn(self.at(self.DONE), self.clicks_on())
+                else:
+                    self.assertEqual(self.clicks_on()[-1], self.at(self.DONE))
+                    self.assertEqual(self.closed, [])
+
+    def test_with_the_menu_unread_a_window_of_another_title_counts_by_what_it_shows(self):
+        """Clicked by its place (2026-11-11: 「the WeChat window is too small (164x164)」 for the menu's OCR), a new
+        window of another title showing 搜索 and 完成 is the picker too; one titled plainly 「微信」 is not (the test
+        above: some builds title the add-friend window so)."""
+        screens = self.flow()
+        screens[0] = []
+        screens.insert(1, self.EMPTY)
+        result = self.create(screens, item_opens=lambda: self.desktop.add(PICKER, title="选择群成员", rect=self.PICKER_RECT))
+        self.assertEqual(result["ok"], True, result)
+        self.assertEqual(self.clicks_on()[1], (10 + 100, 60 + int(0.17 * 240)))
+
+    def test_a_picker_that_shows_two_seconds_after_the_click_is_still_found(self):
+        clock = {"now": 0.0, "at": None}
+
+        def sleep(seconds):
+            clock["now"] += seconds
+            if clock["at"] is not None and clock["now"] >= clock["at"]:
+                clock["at"] = None
+                self.desktop.add(PICKER, title="发起群聊", rect=self.PICKER_RECT)
+
+        def later():
+            clock["at"] = clock["now"] + 2.0
+        result = self.create(self.flow(), item_opens=later, sleep=sleep)
+        self.assertEqual(result["ok"], True, result)
+        self.assertEqual(self.clicks_on()[:3], [(280, 56), self.MENU_ITEM, self.at(self.BOX)])   # the menu closed: no
+                                                                                                 # second click
+
+    def test_the_picker_is_not_waited_for_much_longer_than_three_seconds(self):
+        clock = {"now": 0.0, "clicked": None}
+
+        def sleep(seconds):
+            clock["now"] += seconds
+
+        def opened():
+            clock["clicked"] = clock["now"]
+        result = self.create(self.flow(), item_opens=opened, sleep=sleep)
+        self.assertEqual(result["reason"], "no_picker")
+        self.assertTrue(3.0 <= clock["now"] - clock["clicked"] <= 3.5, clock)
+
+    def test_a_click_that_left_the_menu_open_is_made_once_more(self):
+        with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+            result = self.create(self.flow(), opens_on=2)
+        self.assertEqual(result["ok"], True, result)
+        self.assertEqual(self.clicks_on()[:4], [(280, 56), self.MENU_ITEM, self.MENU_ITEM, self.at(self.BOX)])
+        self.assertIn("by its title at look", "\n".join(logs.output))
+        self.assertIn("(after a second click)", "\n".join(logs.output))
+
+    def test_the_item_is_clicked_at_most_twice_and_the_message_says_the_menu_stayed_open(self):
+        with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+            result = self.create(self.flow(), opens_on=3)
+        self.assertEqual(result["reason"], "no_picker")
+        self.assertEqual(self.clicks_on(), [(280, 56), self.MENU_ITEM, self.MENU_ITEM])
+        self.assertTrue(result["message"].endswith("什么也没勾，没有建群（点了两次「发起群聊」，菜单没有关）"), result["message"])
+        self.assertEqual(self.window.pasted, [])
+        line = self.miss_line(logs)
+        for said in ("item: read in the menu", "second click: yes", "the (+) menu (200x240) still open at the end: yes",
+                     "new WeChat windows: none"):
+            self.assertIn(said, line)
+
+    def test_a_new_window_that_does_not_show_the_picker_is_neither_used_nor_closed(self):
+        tip = 610
+        not_picker = [self.BOX, self.CANCEL]                               # a search box, but no 完成
+
+        def opens():
+            self.desktop.add(OTHER, title="测试窗口", rect=self.PICKER_RECT)
+            self.desktop.add(tip, cls="Qt51514QWindowToolTipSaveBits", title="", rect=(300, 300, 420, 340))
+        with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+            result = self.create([self.MENU_ROWS, not_picker, not_picker, [self.BOX]], item_opens=opens)
+        self.assertEqual(result["reason"], "no_picker")
+        self.assertTrue(result["message"].endswith("没有建群（点了「发起群聊」，出现了 2 个认不出的窗口，没有动它们）"),
+                        result["message"])
+        self.assertEqual(self.ocr.hwnds, [MENU, OTHER, OTHER, HWND])      # read twice (the small one never), then the
+        self.assertEqual(self.clicks_on(), [(280, 56), self.MENU_ITEM])    # main window; no second click: one opened
+        self.assertIn(OTHER, self.desktop.windows)
+        self.assertIn(tip, self.desktop.windows)
+        self.assertEqual(self.closed, [])
+        self.assertEqual(self.window.pasted, [])
+        self.assertEqual([k for k in self.keys if k[1:3] != (CTRL, 0x31)], [])
+        line = self.miss_line(logs)
+        self.assertIn("Qt51514QWindowIcon 800x700 title other(4 chars) read 2x: 搜索 yes, 完成 no; "
+                      "Qt51514QWindowToolTipSaveBits 120x40 title empty", line)
+        self.assertNotIn("测试窗口", "\n".join(logs.output))
+
+    def test_each_way_of_missing_the_picker_says_which_in_the_message(self):
+        in_main = [row("发起群聊", 0.40, 0.02, 0.55, 0.05), self.BOX, self.DONE, self.CANCEL]
+        cases = (
+            ("nothing opened", [self.MENU_ROWS, [self.BOX]], lambda: None, "（点了「发起群聊」以后什么窗口也没出现）",
+             "new WeChat windows: none; the main window reads 「发起群聊」 no, a 搜索 box yes, 完成/确定 no"),
+            ("drawn in the main window", [self.MENU_ROWS, in_main], lambda: None,
+             "（点了「发起群聊」，选人的界面像是开在微信主窗口里，机器人还不会在那里选人）",
+             "the main window reads 「发起群聊」 yes, a 搜索 box yes, 完成/确定 yes"),
+            ("a chat opened", [self.MENU_ROWS, [self.BOX]],
+             lambda: self.desktop.add(OTHER, title="小朋友", rect=self.PICKER_RECT),
+             "（点了「发起群聊」，出现了 1 个认不出的窗口，没有动它们）", "Qt51514QWindowIcon 800x700 title chat;"),
+        )
+        for name, screens, opens, clause, said in cases:
+            with self.subTest(name):
+                self.setUp()
+                with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+                    result = self.create(screens, item_opens=opens)
+                self.assertEqual(result["reason"], "no_picker")
+                self.assertEqual(result["message"], "没打开微信的「发起群聊」窗口，什么也没勾，没有建群" + clause)
+                self.assertEqual(self.clicks_on(), [(280, 56), self.MENU_ITEM])
+                self.assertEqual(self.ocr.hwnds, [MENU, HWND])             # the chat is not read: the main window once
+                self.assertEqual(self.closed, [])
+                line = self.miss_line(logs)
+                self.assertIn("second click: no", line)
+                self.assertIn("still open at the end: no", line)
+                self.assertIn(said, line)
+                self.assertNotIn("小朋友", "\n".join(logs.output))
 
     def test_with_the_item_read_a_new_dialog_titled_plainly_weixin_is_the_picker(self):
         result = self.create(self.flow(), item_opens=lambda: self.desktop.add(PICKER, title="微信", rect=self.PICKER_RECT))
