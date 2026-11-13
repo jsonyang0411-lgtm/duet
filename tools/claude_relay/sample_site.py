@@ -3,8 +3,9 @@
 网站够不到这台 Mac（Mac 在 NAT 后面，只有 Tailscale 能到），所以只有 Mac 去找网站：
 
 - ``SiteClient``：网站的管理接口（``/admin/api/*``，Bearer 密钥；只走 https，本机地址除外）。
-- 目录（``build_catalog`` / ``upload_catalog``，命令 ``catalog``）：按规则挑款（``RANKERS``：聚水潭近 30 天热卖、手写的
-  款号单、淘宝生意参谋——最后一个现在读不到，见 ``rank_tb_sycm``），每款用聚水潭 ``goods-detail`` 读颜色、尺码、库存，
+- 目录（``build_catalog`` / ``upload_catalog``，命令 ``catalog``）：按规则挑款（``RANKERS``：淘宝店自己近 30 / 15 / 7 天的
+  销量按款合并（默认，``rank_tb_shop``；读不到时退回聚水潭近 30 天热卖并说明）、聚水潭近 30 天热卖、手写的款号单），
+  顺着排行往下走，取前 ``top_n`` 个「达人真的能选」的款（跳过的在试生成里列出来），每款用聚水潭 ``goods-detail`` 读颜色、尺码、库存，
   真实库存 = 库存 − 虚拟库存，不够 ``min_stock`` 的颜色 / 尺码不上架；每个编码要在抖店商品目录（kb/products.json）里
   有对应的商品和 SKU（寄样单按店铺商品建），对不上的不上架。图片下载后缩小再传到网站，网站不外链。
   传成功以后把「编码 → 抖店商品 / SKU」写进 ``catalog-map.json``（仓库外，0600）：建单时按它换。
@@ -73,12 +74,17 @@ IMAGE_SOURCE_MAX = 12 * 1024 * 1024     # what is downloaded at most
 IMAGE_EDGE = 640                        # the longer edge after shrinking
 JST_GAP_SEC = 3.0                       # between two read-only 聚水潭 calls
 MAX_STYLES = 60
+TB_SOURCE, HOT_SOURCE = "tb_shop", "jst_hot30"
+TB_PERIODS = {30: "sale30d", 15: "sale15d", 7: "sale7d"}     # catalog.days -> the column of `jst shop-goods --all`
+STYLE_BATCH = 25                        # item codes one `jst sku-styles` call asks about (the CLI's own cap)
+WALK_MAX = 60                           # how far down the ranking the builder walks for its top_n showable styles
 
 DEFAULTS = {
     "url": "", "token_file": "", "token": "", "owner": "main", "timeout_sec": 20,
     "max_items": 3, "expires_days": 14, "link_text": LINK_TEXT, "order_reply": ORDER_REPLY,
     "audit": True, "shop": "dy", "logistics": "",
-    "catalog": {"source": "jst_hot30", "top_n": 20, "pinned": [], "excluded": [], "styles": [], "names": {},
+    "catalog": {"source": "tb_shop", "days": 30, "top_n": 20, "walk_max": 60, "tb_listings": 300,
+                "pinned": [], "excluded": [], "styles": [], "names": {},
                 "descs": {}, "min_stock": 1, "image_url": IMAGE_URL, "image_hosts": [], "prefer_items": []},
 }
 
@@ -274,48 +280,98 @@ def _codes(value) -> list:
     return out
 
 
-def rank_manual(conf: dict, jst: Callable) -> list:
+def rank_manual(conf: dict, jst: Callable, sleep: Callable = time.sleep) -> list:
     """The hand-kept list (``catalog.styles``: style codes in the order to show)."""
     return [{"code": code, "name": "", "sales": None} for code in _codes(conf.get("styles"))]
 
 
-def rank_jst_hot30(conf: dict, jst: Callable) -> list:
+def _sold(row: dict, field: str = "sale30d") -> float:
+    value = row.get(field)
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else -1
+
+
+def rank_jst_hot30(conf: dict, jst: Callable, sleep: Callable = time.sleep) -> list:
     """聚水潭「近 30 天热卖」（`jst goods --sort hot30`，平台给前 50 款）：ERP 里所有店铺合起来的销量，不是只算淘宝店。"""
     data = jst(["goods", "--sort=hot30", "--page-size=50"])
     rows = [r for r in (data.get("rows") or []) if isinstance(r, dict) and _CODE.match(str(r.get("styleCode") or ""))]
     for index, row in enumerate(rows):
         row["_at"] = index
-
-    def sold(row):
-        value = row.get("sale30d")
-        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else -1
-
-    rows.sort(key=lambda r: (-sold(r), r["_at"]))
+    rows.sort(key=lambda r: (-_sold(r), r["_at"]))
     return [{"code": str(r["styleCode"]), "name": str(r.get("name") or "").strip(),
-             "sales": sold(r) if sold(r) >= 0 else None} for r in rows]
+             "sales": _sold(r) if _sold(r) >= 0 else None} for r in rows]
 
 
-def rank_tb_sycm(conf: dict, jst: Callable) -> list:
-    """淘宝店自己的销量排行（生意参谋）。2026-11-13 查过：campaign-engineering 有 `oc sycm item-list`（商品排行，认日期），
-    但这台 Mac 的调试 Chrome 里没有淘宝登录（`sycm doctor`：没有 unb Cookie），而且淘宝商品 → 聚水潭款号的对应还没人
-    验证过（要看 `sycm item-search` 的「货号」是不是款号）。所以现在不读：换成 jst_hot30 或 manual。"""
-    raise SiteError("unconfigured", "catalog.source = tb_sycm 现在读不到：这台 Mac 的调试 Chrome 没登录淘宝（生意参谋），"
-                                    "淘宝商品和聚水潭款号的对应也还没接；先用 jst_hot30（聚水潭近 30 天热卖）或 manual（手写款号单）")
+def rank_tb_shop(conf: dict, jst: Callable, sleep: Callable = time.sleep) -> list:
+    """淘宝店自己的销量（默认的来源，2026-11-13 子账号开了淘宝店的权限）：`jst shop-goods --platform=TB --all` 列出这家店在售
+    的全部商品，每行有近 30 / 15 / 7 天的销量（``catalog.days``，默认 30）和**一个** ERP 商品编码。同一款常常挂着几个淘宝
+    商品（卖得最好的那款 2 个，有的 5 个），所以先用 `jst sku-styles` 查每个编码是哪一款（老的单色款也是查出来的：款号 =
+    编码去掉尺码，不靠猜），把销量按款加起来再排；销量一样的，最好卖的那个商品排在前面的款在前。只查卖得最好的
+    ``catalog.tb_listings``（默认 300）个商品的款号：后面的长尾销量很小，查它们要多发十几次请求。
+    列表是空的、一件都没卖、平台不给看（别的子账号没有这个权限）：``SiteError``，``build_catalog`` 退回 jst_hot30。"""
+    days = conf.get("days") if conf.get("days") in TB_PERIODS else 30
+    field = TB_PERIODS[days]
+    data = jst(["shop-goods", "--platform=TB", "--all"])
+    rows = [r for r in (data.get("rows") or []) if isinstance(r, dict) and _CODE.match(str(r.get("itemCode") or ""))
+            and _sold(r, field) > 0]
+    if not rows:
+        raise SiteError("empty", f"淘宝店的商品列表里没有近 {days} 天卖出去的商品（列表是空的，或者这个子账号看不到淘宝店）")
+    for index, row in enumerate(rows):
+        row["_at"] = index
+    rows.sort(key=lambda r: (-_sold(r, field), r["_at"]))
+    most = conf.get("tb_listings")
+    rows = rows[:most if isinstance(most, int) and not isinstance(most, bool) and 20 <= most <= 2000 else 300]
+    codes = []
+    for row in rows:
+        if row["itemCode"] not in codes:
+            codes.append(str(row["itemCode"]))
+    style_of, stock_of = {}, {}
+    for start in range(0, len(codes), STYLE_BATCH):
+        sleep(JST_GAP_SEC)
+        answer = jst(["sku-styles", "--codes=" + ",".join(codes[start:start + STYLE_BATCH])])
+        for found in answer.get("rows") or []:
+            if isinstance(found, dict) and _CODE.match(str(found.get("styleCode") or "")):
+                style_of[str(found.get("itemCode"))] = str(found["styleCode"])
+                have = found.get("styleStock")           # the style's 可用库存 over all its SKUs (None: not told)
+                if isinstance(have, (int, float)) and not isinstance(have, bool):
+                    stock_of[str(found["styleCode"])] = have
+    merged: dict = {}
+    for index, row in enumerate(rows):                   # (best seller first: a style's place among ties)
+        style = style_of.get(str(row["itemCode"]))
+        if style is None:
+            continue                                     # (a code the ERP does not know: no style to show)
+        entry = merged.setdefault(style, {"code": style, "name": "", "sales": 0, "listings": 0, "_at": index,
+                                          "title": str(row.get("title") or "").strip()[:30]})
+        entry["sales"] += _sold(row, field)
+        entry["listings"] += 1
+    if not merged:
+        raise SiteError("empty", "淘宝店卖得最好的商品，编码在聚水潭里都查不到款号")
+    ranked = sorted(merged.values(), key=lambda e: (-e["sales"], e["_at"]))
+    return [{"code": e["code"], "name": "", "sales": e["sales"], "listings": e["listings"], "title": e["title"],
+             "stock": stock_of.get(e["code"])} for e in ranked]
 
 
-RANKERS = {"manual": rank_manual, "jst_hot30": rank_jst_hot30, "tb_sycm": rank_tb_sycm}
+RANKERS = {TB_SOURCE: rank_tb_shop, HOT_SOURCE: rank_jst_hot30, "manual": rank_manual}
+SOURCE_NAMES = {TB_SOURCE: "淘宝店近 {days} 天的销量（按款合并）", HOT_SOURCE: "聚水潭近 30 天热卖（所有店铺合起来）",
+                "manual": "手写的款号单"}
 
 
-def choose_styles(ranked: list, conf: dict) -> list:
-    """The styles to show, in order: the pinned ones first (``catalog.pinned``), then the first ``top_n`` of the
-    ranking that are neither pinned nor excluded (``catalog.excluded``); at most MAX_STYLES."""
+def walk_order(ranked: list, conf: dict) -> tuple:
+    """``(pinned, rest, walk)``: the styles to try, in order.  ``pinned`` (``catalog.pinned``, not excluded) always go in
+    when they can be shown; ``rest`` is the ranking without the pinned and the excluded ones (``catalog.excluded``):
+    the builder walks down it and takes the first ``top_n`` it can show, reading at most ``walk`` styles' details
+    (``catalog.walk_max``, default WALK_MAX; a style 聚水潭 says has no stock at all is passed over unread)."""
     pinned, excluded = _codes(conf.get("pinned")), set(_codes(conf.get("excluded")))
-    names = {r["code"]: r for r in ranked}
-    out = [names.get(code) or {"code": code, "name": "", "sales": None} for code in pinned if code not in excluded]
-    top_n = conf.get("top_n")
-    top_n = top_n if isinstance(top_n, int) and not isinstance(top_n, bool) and 0 <= top_n <= MAX_STYLES else 20
+    known = {r["code"]: r for r in ranked}
+    first = [known.get(code) or {"code": code, "name": "", "sales": None} for code in pinned if code not in excluded]
     rest = [r for r in ranked if r["code"] not in excluded and r["code"] not in pinned]
-    return (out + rest[:top_n])[:MAX_STYLES]
+    walk = conf.get("walk_max")
+    walk = walk if isinstance(walk, int) and not isinstance(walk, bool) and 1 <= walk <= 200 else WALK_MAX
+    return first[:MAX_STYLES], rest, walk
+
+
+def top_n_of(conf: dict) -> int:
+    top_n = conf.get("top_n")
+    return top_n if isinstance(top_n, int) and not isinstance(top_n, bool) and 0 <= top_n <= MAX_STYLES else 20
 
 
 # ── one style: colours, sizes, real stock, the shop's product ───────────────
@@ -342,6 +398,15 @@ def size_label(spec) -> str:
     text = _SPEC_HEAD.sub("", str(spec or "").strip())
     text = re.sub(r"^F(?=$|[\s(（])", "均码", text)
     return text[:60] or "均码"
+
+
+_COLOUR_HEAD = re.compile(r"^\s*颜色(?:分类)?\s*[:：]\s*")
+
+
+def colour_label(colour) -> str:
+    """A colour as the page shows it (and as its picture is named): 聚水潭 writes some as 「颜色:水蓝」 (seen in the real
+    dry run, 2026-11-13); nothing there: 默认."""
+    return _COLOUR_HEAD.sub("", str(colour or "").strip())[:60] or "默认"
 
 
 def shop_index(products: Optional[dict], shop: str = "dy") -> dict:
@@ -413,7 +478,7 @@ def style_entry(style: dict, detail: dict, index: dict, conf: dict) -> tuple:
         item_code = sku["itemCode"]
         if item_code not in chosen:
             continue
-        colour = str(sku.get("colour") or "").strip()[:60] or "默认"
+        colour = colour_label(sku.get("colour"))
         size = size_label(sku.get("spec"))
         entry = next((c for c in colours if c["name"] == colour), None)
         if entry is None:
@@ -507,60 +572,109 @@ def image_key(data: bytes) -> str:
 
 def build_catalog(conf: dict, *, jst: Callable, products: Optional[dict], fetch: Optional[Callable] = None,
                   local_image: Optional[Callable] = None, sleep: Callable = time.sleep, say: Callable = None) -> dict:
-    """The catalogue by this Mac's rule: ``{"doc", "images": {key: (bytes, type)}, "map", "notes", "styles":
-    [{"code", "name", "sales", "colours"}]}``.  ``jst(words) -> dict`` runs one read-only 聚水潭 command (``goods``,
-    ``goods-detail``; ``JST_GAP_SEC`` apart); ``products``: kb/products.json; ``fetch(url) -> bytes`` downloads a
-    picture; ``local_image(entry) -> bytes`` gives the shop product's main picture when a colour has none of its own.
-    Nothing is written and nothing is sent to the site here."""
+    """The catalogue by this Mac's rule: ``{"doc", "images": {key: (bytes, type)}, "map", "notes", "source", "styles":
+    [{"rank", "code", "name", "sales", "colours"}], "skipped": [{"rank", "code", "name", "sales", "why"}]}``.
+
+    The ranking comes from ``catalog.source`` (``RANKERS``; the Taobao shop's own sales by default, and when that
+    cannot be read — an empty list, a sub-account without the shop — 聚水潭's hot30 instead, said in ``notes``).
+    「前 N」 means N styles a creator can really pick: the pinned styles first, then down the ranking (at most
+    ``catalog.walk_max`` styles read; one whose style-level stock 聚水潭 gave as 0 is passed over without a read)
+    taking the first ``top_n`` that have at least one colour really in stock, sold by a 抖店 product and with a picture; the higher-ranked ones passed over are in ``skipped`` with why (what the boss
+    would expect to find and does not).  ``jst(words) -> dict`` runs one read-only 聚水潭 command (``JST_GAP_SEC``
+    apart); ``products``: kb/products.json; ``fetch(url) -> bytes`` downloads a picture; ``local_image(entry) ->
+    bytes`` gives the shop product's main picture when a colour has none of its own.  Nothing is written and nothing
+    is sent to the site here."""
     say = say or (lambda text: None)
     catalog_conf = conf["catalog"]
     source = str(catalog_conf.get("source") or "")
     if source not in RANKERS:
         raise SiteError("unconfigured", f"catalog.source 只能是 {'、'.join(RANKERS)}")
-    ranked = RANKERS[source](catalog_conf, jst)
-    styles = choose_styles(ranked, catalog_conf)
-    if not styles:
+    notes = []
+    try:
+        ranked = RANKERS[source](catalog_conf, jst, sleep)
+    except SiteError as e:
+        if source != TB_SOURCE:
+            raise
+        # (another sub-account without the Taobao shop, or a shop that sold nothing: the catalogue still comes out)
+        notes.append(f"淘宝店的销量没读到（{e}）：这次改按聚水潭近 30 天热卖排（所有店铺合起来的销量）")
+        say(notes[-1])
+        source = HOT_SOURCE
+        sleep(JST_GAP_SEC)
+        ranked = RANKERS[source](catalog_conf, jst, sleep)
+    pinned, rest, walk = walk_order(ranked, catalog_conf)
+    if not pinned and not rest:
         raise SiteError("unconfigured", "一款都没挑出来：catalog.source 是 manual 时在 catalog.styles 里写款号，"
                                         "别的来源看排行有没有读到")
-    say(f"按 {source} 挑了 {len(styles)} 款")
+    days = catalog_conf.get("days") if catalog_conf.get("days") in TB_PERIODS else 30
+    say(f"来源：{SOURCE_NAMES[source].format(days=days)}；排行里 {len(ranked)} 款，最多读 {walk} 款的明细")
     index = shop_index(products, conf.get("shop") or "dy")
     hosts = image_hosts(catalog_conf)
     fetch = fetch or (lambda url: fetch_picture(url, hosts))
-    doc, images, mapping, notes, shown = {"styles": []}, {}, {}, [], []
-    for n, style in enumerate(styles):
-        if n or source != "manual":
+    rank_of = {r["code"]: n for n, r in enumerate(ranked, 1)}
+    doc, images, mapping, shown, skipped = {"styles": []}, {}, {}, [], []
+    asked = [0]
+
+    def one(style: dict) -> bool:
+        """Read one style and add it when it can be shown; else note why it was passed over."""
+        have = style.get("stock")
+        if isinstance(have, (int, float)) and not isinstance(have, bool) and have <= 0:
+            # (聚水潭's 可用库存 of the whole style is 0: no colour can pass, its details are not read)
+            skipped.append({"rank": rank_of.get(style["code"]), "code": style["code"],
+                            "name": str(style.get("title") or style.get("name") or "")[:60], "sales": style.get("sales"),
+                            "why": "聚水潭里这一款现在没有现货（整款可用库存是 0），没读明细"})
+            return False
+        if asked[0] or source != "manual":
             sleep(JST_GAP_SEC)
+        asked[0] += 1
         detail = jst(["goods-detail", f"--style-code={style['code']}"])
         entry, style_map, style_notes = style_entry(style, detail, index, {**catalog_conf, "shop": conf.get("shop")})
-        notes += style_notes
-        if entry is None:
-            continue
         colours = []
-        for colour in entry["colours"]:
+        for colour in (entry or {}).get("colours") or []:
             data, kind = shrink(fetch(picture_url(catalog_conf, style["code"], colour["name"])))
             if not data and local_image is not None:
                 first = style_map[colour["sizes"][0]["sku"]]
                 data, kind = shrink(local_image(next((e for e in index.get(colour["sizes"][0]["sku"]) or []
                                                       if e["item_id"] == first["item_id"]), {})) or b"")
             if not data:
-                notes.append(f"{style['code']}（{entry['name']}）{colour['name']}：没有图，这个颜色没放")
+                style_notes.append(f"{style['code']}（{entry['name']}）{colour['name']}：没有图，这个颜色没放")
                 for size in colour["sizes"]:
                     style_map.pop(size["sku"], None)
                 continue
             key = image_key(data)
             images[key] = (data, kind)
             colours.append({**colour, "image": key})
+        if entry is not None and not colours:
+            style_notes.append(f"{style['code']}（{entry['name']}）：一个有图的颜色都没有，这一款没放")
+        notes.extend(style_notes)
         if not colours:
-            notes.append(f"{style['code']}（{entry['name']}）：一个有图的颜色都没有，这一款没放")
-            continue
+            skus = [k for k in (detail.get("skus") or []) if isinstance(k, dict)]
+            name = (entry or {}).get("name") or str((skus[0].get("name") if skus else "") or style.get("name") or "")
+            skipped.append({"rank": rank_of.get(style["code"]), "code": style["code"], "name": name[:60],
+                            "sales": style.get("sales"), "why": (style_notes[-1] if style_notes else "没有能放上网站的颜色")})
+            return False
         doc["styles"].append({**entry, "colours": colours})
         mapping.update(style_map)
-        shown.append({"code": style["code"], "name": entry["name"], "sales": style.get("sales"),
-                      "colours": [f"{c['name']}（{'/'.join(s['label'] for s in c['sizes'])}）" for c in colours]})
+        shown.append({"rank": rank_of.get(style["code"]), "code": style["code"], "name": entry["name"],
+                      "sales": style.get("sales"),
+                      "colours": [f"{c['name']}（{'/'.join(z['label'] for z in c['sizes'])}）" for c in colours]})
         say(f"{len(doc['styles'])}. {entry['name']}：{len(colours)} 个颜色")
+        return True
+
+    for style in pinned:
+        one(style)
+    want, taken = top_n_of(catalog_conf), 0
+    read_before = asked[0]
+    for style in rest:
+        if taken >= want or len(doc["styles"]) >= MAX_STYLES or asked[0] - read_before >= walk:
+            break
+        taken += 1 if one(style) else 0
+    if taken < want and len(rest) and source != "manual":
+        notes.append(f"顺着排行读了 {asked[0] - read_before} 款的明细（没现货的 {sum(1 for k in skipped if '没读明细' in k['why'])} 款没读），"
+                     f"只有 {taken} 款能放上网站（想要 {want} 款）：排行不够长，或者 catalog.walk_max 调大一点")
     if not doc["styles"]:
         raise SiteError("error", "挑出来的款都放不上网站（没有现货、抖店目录里没有、或者没有图）：" + "；".join(notes[:5]))
-    return {"doc": doc, "images": images, "map": mapping, "notes": notes, "styles": shown}
+    return {"doc": doc, "images": images, "map": mapping, "notes": notes, "styles": shown, "skipped": skipped,
+            "source": source}
 
 
 def save_map(mapping: dict, home: Optional[Path] = None, version=None) -> Path:
@@ -773,6 +887,11 @@ def _load_platforms():
     return module
 
 
+# The read-only 聚水潭 commands a catalogue may run, each with its timeout in seconds (`shop-goods --all` pages through
+# the whole shop, 3 s between two pages).
+READ_ONLY = {"goods": 120, "goods-detail": 120, "sku-styles": 120, "shop-goods": 600}
+
+
 def jst_runner(platforms, cfg: dict, say: Callable = None) -> Callable:
     """``jst(words) -> dict``: one read-only 聚水潭 command (never ``--execute``) under the Mac's one-CLI-at-a-time lock,
     with ``--expect-uid`` when this Mac names its sub-account."""
@@ -781,11 +900,11 @@ def jst_runner(platforms, cfg: dict, say: Callable = None) -> Callable:
     who = [f"--expect-uid={cfg['jst_expect_uid']}"] if cfg.get("jst_expect_uid") else []
 
     def jst(words: list) -> dict:
-        if any(str(w).startswith("--execute") for w in words) or words[0] not in ("goods", "goods-detail"):
+        if any(str(w).startswith("--execute") for w in words) or words[0] not in READ_ONLY:
             raise SiteError("error", "目录只跑聚水潭的只读命令")
         with platforms.CliLock(HOME_DIR / "platform" / "cli.lock"):
             run = platforms.run_cli([cfg["node"], platforms.CLI_FILES["jst"], *words, *who], cfg["dirs"]["jst"],
-                                    timeout=120, env=platforms.cli_env(cfg), interruptible=True)
+                                    timeout=READ_ONLY[words[0]], env=platforms.cli_env(cfg), interruptible=True)
         data = platforms.parse_json(run.stdout)
         if say:
             say(f"jst {words[0]} -> 退出码 {run.exit_code}")
@@ -851,6 +970,17 @@ def main(argv=None) -> int:
             raise SiteError("unconfigured", "没有抖店商品目录（kb/products.json）：先跑 worker.py --sync-products")
         built = build_catalog(conf, jst=jst_runner(platforms, cfg, say=print), products=products,
                               local_image=_local_image(workspace), say=print)
+        print("会上架的款（排行里第几、款号、款名、销量、颜色）：")
+        for n, style in enumerate(built["styles"], 1):
+            rank = f"第 {style['rank']}" if style.get("rank") else "置顶"
+            sales = style["sales"] if style.get("sales") is not None else "—"
+            print(f"  {n:>2}. {rank} | {style['code']} | {style['name']} | {sales} | {'、'.join(style['colours'])}")
+        if built["skipped"]:
+            print("排行里更靠前、但这次没上架的款（为什么）：")
+            for style in built["skipped"]:
+                rank = f"第 {style['rank']}" if style.get("rank") else "置顶"
+                sales = style["sales"] if style.get("sales") is not None else "—"
+                print(f"  · {rank} | {style['code']} | {style['name']} | {sales} | {style['why']}")
         for note in built["notes"]:
             print(f"  · {note}")
         if args.out:

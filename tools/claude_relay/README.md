@@ -510,7 +510,7 @@ worker 做三种任务，都不用模型：
 | `meta.site_link` | 给这位达人建专属链接，答复是一份固定句子的草稿（`link_text`） |
 | `meta.site_order` | 把她选的编码按 `~/.claude-relay/platform/sample-site/catalog-map.json` 换成 `jst.sample_order`（抖店商品 ID / SKU ID、她填的收货信息，电话是〈手机N〉），照常预览（只读），做一张「选款单」（她选的每一顶的图和名字，走只给运营看的通道）。**不对图**（`sample_order_gate` 不调）：编码是她自己在我们的目录里点的。批准后的执行计划是建单 + 审核（`sample_site.audit: false` 时只建单） |
 
-淘宝店销量排行（生意参谋）现在读不到，目录默认按聚水潭「近 30 天热卖」（ERP 全店铺）；`catalog.source: manual` 用手写的款号单。
+目录默认按**淘宝店自己近 30 天的销量**排（`catalog.source: tb_shop`，2026-11-13 子账号开了淘宝店的权限：`jst shop-goods --platform=TB --all` 列出在售商品和销量，`jst sku-styles` 查每个商品是哪一款，按款合并）；读不到时自己退回 `jst_hot30`（聚水潭近 30 天热卖，ERP 全店铺）并说明；`manual` 用手写的款号单。「前 20」是顺着排行取前 20 个真的能上架的款，跳过的在 `--dry-run` 里列出来。要 jushuitan-engineering 里有这两条命令（本机分支 `sample-audit` 的 bcff3ca、befa6a8、fc3e1a8、7836f07）。
 
 安全（2026-11-13 评审）：管理接口的请求从不跟着跳转走（urllib 默认会把 `Authorization` 带到跳转去的地方，别的主机、明文 http 也带）：网站答 3xx 就报「答了一个跳转」，把 `sample_site.url` 改成最终的 https 地址。通用链接来的提交，抖音号是提交的人自己填的：机器人那边一律要人批、不自动建（见 `sample-site.md` 第三节）。
 

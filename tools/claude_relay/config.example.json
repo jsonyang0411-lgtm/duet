@@ -29,8 +29,10 @@
     "expires_days": 14,
     "audit": true,
     "catalog": {
-      "source": "jst_hot30",
+      "source": "tb_shop",
+      "days": 30,
       "top_n": 20,
+      "walk_max": 60,
       "pinned": [],
       "excluded": [],
       "styles": [],

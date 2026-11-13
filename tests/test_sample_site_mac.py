@@ -169,7 +169,8 @@ def test_the_settings_are_checked_and_the_key_never_goes_over_plain_http(worker,
         site_.settings_of({"sample_site": {"url": "http://xuan.example.test"}})
     conf = site_.settings_of({"sample_site": {"url": "https://xuan.example.test/"}})
     assert conf["url"] == "https://xuan.example.test" and conf["owner"] == "main" and conf["max_items"] == 3
-    assert conf["audit"] is True and conf["catalog"]["source"] == "jst_hot30" and conf["catalog"]["top_n"] == 20
+    assert conf["audit"] is True and conf["catalog"]["source"] == "tb_shop" and conf["catalog"]["top_n"] == 20
+    assert conf["catalog"]["days"] == 30 and conf["catalog"]["walk_max"] == 60
     for bad in ({"max_items": 11}, {"link_text": "没有链接的话"}, {"order_reply": "单号 {寄样单号}"}, {"owner": "两个人"},
                 {"shop": "xhs"}):
         with pytest.raises(site_.SiteError):
@@ -298,8 +299,8 @@ def test_pinned_styles_come_first_and_a_hand_kept_list_needs_no_ranking(mac, wor
         ("T1001", "渔夫帽·经典款", "软顶可折叠")]
     assert [c["argv"][1] for c in mac.node.calls()] == ["goods-detail"]      # no ranking was read
     site_ = worker.sample_site
-    with pytest.raises(site_.SiteError, match="tb_sycm"):
-        build(mac, worker, source="tb_sycm")                                 # said plainly: not readable today
+    with pytest.raises(site_.SiteError, match="catalog.source 只能是 tb_shop、jst_hot30、manual"):
+        build(mac, worker, source="tb_sycm")                                 # (the old placeholder is gone)
 
 
 def test_a_size_reads_as_a_person_would_say_it(worker):  # noqa: F811
@@ -307,6 +308,175 @@ def test_a_size_reads_as_a_person_would_say_it(worker):  # noqa: F811
     assert label("尺码:F(52-60cm)") == "均码(52-60cm)" and label("尺码：M(56-58cm)") == "M(56-58cm)"
     assert label("F") == "均码" and label("") == "均码" and label(None) == "均码" and label("L") == "L"
     assert label("Free") == "Free" and label("规格: 均码") == "均码"
+    colour = worker.sample_site.colour_label
+    assert colour("颜色:水蓝") == "水蓝" and colour("颜色分类： 燕麦") == "燕麦" and colour("黑色") == "黑色" and colour("") == "默认"
+
+
+# ── the Taobao shop's own sales (the default source, 2026-11-13) ────────────
+
+def tb_row(code, sold30, sold7=0, sold15=0, title="测试淘宝商品"):
+    """One row of `jst shop-goods --platform=TB --all`: a listing, ONE of its item codes, its sales."""
+    return {"productId": "8" + code[1:5] + "0001", "title": title, "shopId": "30000009", "shopName": "测试淘宝店",
+            "itemCode": code, "sale30d": sold30, "sale15d": sold15, "sale7d": sold7, "minPrice": 199, "maxPrice": 199}
+
+
+STYLE_OF = {"T1001A-F": "T1001", "T1001B-F": "T1001", "T1002A-M": "T1002", "T1009A-F": "T1009", "T72509018A-L": "T72509018A",
+            "T1010A-F": "T1010", "T1020A-F": "T1020"}
+
+
+class FakeJst:
+    """`jst(words)` as the builder calls it, answered from tables; keeps what was asked."""
+
+    def __init__(self, listings, details=None, hot=None, refuse=(), stock=None):
+        self.listings, self.details, self.hot, self.refuse, self.calls = listings, details or DETAILS, hot or HOT, refuse, []
+        self.stock = stock or {}                       # style -> its 可用库存 as `sku-styles` tells it (None: not told)
+
+    def __call__(self, words):
+        self.calls.append(list(words))
+        if words[0] in self.refuse:
+            raise RuntimeError("the builder must turn a CLI failure into its own error")       # (see ``refusing``)
+        if words[0] == "shop-goods":
+            assert words[1:] == ["--platform=TB", "--all"]
+            return {"platform": "TB", "total": len(self.listings), "complete": True, "rows": [dict(r) for r in self.listings]}
+        if words[0] == "sku-styles":
+            codes = words[1].split("=", 1)[1].split(",")
+            assert len(codes) <= 25
+            return {"rows": [{"itemCode": c, "styleCode": STYLE_OF[c], "enabled": True,
+                              "styleStock": self.stock.get(STYLE_OF[c])} for c in codes if c in STYLE_OF],
+                    "missing": [c for c in codes if c not in STYLE_OF]}
+        if words[0] == "goods":
+            return self.hot
+        code = words[1].split("=", 1)[1]
+        return {"styleCode": code, "found": code in self.details, "skus": self.details.get(code, [])}
+
+
+def tb_build(worker, jst, **conf):  # noqa: F811
+    site_ = worker.sample_site
+    settings_ = site_.settings_of({"sample_site": {"url": "https://xuan.example.test", "catalog": conf}})
+    return site_.build_catalog(settings_, jst=jst, products=products(), fetch=lambda url: png_bytes((30, 40, 90), 16),
+                               sleep=lambda sec: None)
+
+
+def test_the_default_is_the_taobao_shops_sales_merged_per_style(worker):  # noqa: F811
+    """Two listings of one style add up (it then outsells the single best listing); a listing whose code the ERP does
+    not know and one that sold nothing in the period do not count; the styles are read in that order."""
+    jst = FakeJst([tb_row("T1002A-M", 70), tb_row("T1001A-F", 45), tb_row("T1001B-F", 40), tb_row("T9999Z-F", 500),
+                   tb_row("T1009A-F", 0), tb_row("T1010A-F", 5)])
+    ranked = worker.sample_site.rank_tb_shop({"days": 30}, jst, lambda sec: None)
+    assert [(r["code"], r["sales"], r["listings"]) for r in ranked] == [("T1001", 85, 2), ("T1002", 70, 1), ("T1010", 5, 1)]
+    assert [c[0] for c in jst.calls] == ["shop-goods", "sku-styles"]
+    assert "T1009A-F" not in jst.calls[1][1]                                 # nothing sold: its style is not even asked
+    built = tb_build(worker, FakeJst(jst.listings), excluded=["T1010"])
+    assert built["source"] == "tb_shop"
+    assert [(st["rank"], st["code"], st["name"], st["sales"]) for st in built["styles"]] == [
+        (1, "T1001", "测试渔夫帽", 85), (2, "T1002", "测试棒球帽", 70)]
+    assert [st["name"] for st in built["doc"]["styles"]] == ["测试渔夫帽", "测试棒球帽"]     # the ERP's names, not Taobao titles
+
+
+def test_the_period_can_be_7_or_15_days_and_anything_else_is_30(worker):  # noqa: F811
+    rows = [tb_row("T1001A-F", 10, sold7=9, sold15=1), tb_row("T1002A-M", 50, sold7=2, sold15=30)]
+    rank = lambda days: [(r["code"], r["sales"]) for r in worker.sample_site.rank_tb_shop(  # noqa: E731
+        {"days": days}, FakeJst(rows), lambda sec: None)]
+    assert rank(7) == [("T1001", 9), ("T1002", 2)] and rank(15) == [("T1002", 30), ("T1001", 1)]
+    assert rank(30) == rank(90) == rank(None) == [("T1002", 50), ("T1001", 10)]
+
+
+def test_an_old_one_colour_code_is_its_own_style_and_ties_keep_the_best_listings_order(worker):  # noqa: F811
+    """An old code (style = the code without its size) is looked up like any other, never guessed from its shape; two
+    styles that sold the same: the one whose best listing comes first in the shop's list stays first."""
+    jst = FakeJst([tb_row("T1020A-F", 30), tb_row("T72509018A-L", 30), tb_row("T1002A-M", 30)])
+    ranked = worker.sample_site.rank_tb_shop({}, jst, lambda sec: None)
+    assert [r["code"] for r in ranked] == ["T1020", "T72509018A", "T1002"]
+    assert jst.calls[1] == ["sku-styles", "--codes=T1020A-F,T72509018A-L,T1002A-M"]
+
+
+def test_only_the_best_listings_are_looked_up_in_batches_of_25(worker):  # noqa: F811
+    rows = [tb_row("T1001A-F", 900)] + [tb_row(f"T3{n:03d}A-F", 800 - n) for n in range(60)]
+    jst = FakeJst(rows)
+    ranked = worker.sample_site.rank_tb_shop({"tb_listings": 30}, jst, lambda sec: None)
+    asked = [c[1].split("=", 1)[1].split(",") for c in jst.calls if c[0] == "sku-styles"]
+    assert [len(a) for a in asked] == [25, 5] and asked[0][0] == "T1001A-F"
+    assert [r["code"] for r in ranked] == ["T1001"]                          # (the made-up codes have no style)
+
+
+def test_top_n_means_n_styles_a_creator_can_pick_and_the_ones_passed_over_are_listed(worker):  # noqa: F811
+    """The best seller has only the platform's virtual stock, the next is not in the 抖店 catalogue: the walk goes on
+    and takes the first two that can be shown; the dry run lists the two passed over, with their rank, sales and why."""
+    details = {**DETAILS, "T1020": [sku("T1020A-F", "测试没上抖店的帽", "黑色", "均码", 9)]}
+    jst = FakeJst([tb_row("T1009A-F", 300), tb_row("T1020A-F", 200), tb_row("T1002A-M", 90), tb_row("T1001A-F", 80),
+                   tb_row("T1010A-F", 70)], details=details)
+    built = tb_build(worker, jst, top_n=2)
+    assert [(st["rank"], st["code"]) for st in built["styles"]] == [(3, "T1002"), (4, "T1001")]
+    assert [(sk["rank"], sk["code"], sk["name"], sk["sales"]) for sk in built["skipped"]] == [
+        (1, "T1009", "测试只有虚拟库存的帽", 300), (2, "T1020", "测试没上抖店的帽", 200)]
+    assert "没有能放上网站的颜色" in built["skipped"][0]["why"] and "没有能放上网站的颜色" in built["skipped"][1]["why"]
+    assert "抖店商品目录里没有" in " ".join(built["notes"])
+    read = [c[1].split("=", 1)[1] for c in jst.calls if c[0] == "goods-detail"]
+    assert read == ["T1009", "T1020", "T1002", "T1001"]                      # stopped once it had its two
+    # the walk has an end: with walk_max 2 nothing showable is reached, and it says so instead of reading on
+    with pytest.raises(worker.sample_site.SiteError, match="放不上网站"):
+        tb_build(worker, FakeJst(jst.listings, details=details), top_n=2, walk_max=2)
+
+
+def test_a_style_with_no_stock_at_all_is_passed_over_without_reading_it(worker):  # noqa: F811
+    """A style with nothing on the shelf (a pre-order one, say): 聚水潭 says so per style with the style lookup, and the
+    builder passes it over without a goods-detail call; the cap of the walk counts only the styles it really read."""
+    jst = FakeJst([tb_row("T1009A-F", 300, title="测试淘宝标题 只有虚拟库存的帽"), tb_row("T1010A-F", 200),
+                   tb_row("T1002A-M", 90), tb_row("T1001A-F", 80)], stock={"T1009": 0, "T1010": 0, "T1002": 11})
+    built = tb_build(worker, jst, top_n=2, walk_max=2)
+    assert [(st["rank"], st["code"]) for st in built["styles"]] == [(3, "T1002"), (4, "T1001")]
+    assert [c[1].split("=", 1)[1] for c in jst.calls if c[0] == "goods-detail"] == ["T1002", "T1001"]
+    assert [(sk["rank"], sk["code"], sk["name"], sk["sales"]) for sk in built["skipped"]] == [
+        (1, "T1009", "测试淘宝标题 只有虚拟库存的帽", 300), (2, "T1010", "测试淘宝商品", 200)]
+    assert all("没有现货" in sk["why"] and "没读明细" in sk["why"] for sk in built["skipped"])
+
+
+def test_fewer_showable_styles_than_asked_for_is_said(worker):  # noqa: F811
+    built = tb_build(worker, FakeJst([tb_row("T1002A-M", 90), tb_row("T1009A-F", 50)]), top_n=5)
+    assert [st["code"] for st in built["styles"]] == ["T1002"]
+    assert "只有 1 款能放上网站（想要 5 款）" in " ".join(built["notes"])
+
+
+@pytest.mark.parametrize("how", ["empty", "nothing sold", "forbidden"])
+def test_without_the_taobao_list_the_catalogue_falls_back_to_hot30_and_says_so(worker, how):  # noqa: F811
+    """Another sub-account without the Taobao shop (the CLI fails), an empty list, a shop that sold nothing: the
+    catalogue is made from 聚水潭's hot30 instead, with a plain note."""
+    site_ = worker.sample_site
+    listings = {"empty": [], "nothing sold": [tb_row("T1001A-F", 0)], "forbidden": []}[how]
+    jst = FakeJst(listings)
+    if how == "forbidden":
+        real = jst.__call__
+
+        def refusing(words):
+            if words[0] == "shop-goods":
+                jst.calls.append(list(words))
+                raise site_.SiteError("error", "聚水潭 shop-goods 没读成（退出码 1：失败或结果未知）")
+            return real(words)
+        built = tb_build(worker, refusing, top_n=2, excluded=["T1010"])
+    else:
+        built = tb_build(worker, jst, top_n=2, excluded=["T1010"])
+    assert built["source"] == "jst_hot30"
+    assert [st["code"] for st in built["styles"]] == ["T1002", "T1001"]
+    assert built["notes"][0].startswith("淘宝店的销量没读到（") and "改按聚水潭近 30 天热卖排" in built["notes"][0]
+    assert [c[0] for c in jst.calls][:2] == ["shop-goods", "goods"]
+    # a source asked for by name does not fall back: its failure is the answer
+    with pytest.raises(site_.SiteError):
+        site_.rank_tb_shop({}, FakeJst([]), lambda sec: None)
+
+
+def test_the_runner_lets_only_the_read_only_commands_through(mac, worker):  # noqa: F811
+    site_ = worker.sample_site
+    mac.node.rules([rule(["shop-goods", "--platform=TB", "--all"], {"platform": "TB", "rows": [tb_row("T1001A-F", 3)]}),
+                    rule(["sku-styles"], {"rows": [{"itemCode": "T1001A-F", "styleCode": "T1001", "enabled": True}]})])
+    jst = site_.jst_runner(worker.platforms, worker.platforms.config(mac.settings))
+    assert jst(["shop-goods", "--platform=TB", "--all"])["rows"][0]["itemCode"] == "T1001A-F"
+    assert jst(["sku-styles", "--codes=T1001A-F"])["rows"][0]["styleCode"] == "T1001"
+    assert all(f"--expect-uid={JST_UID}" in c["argv"] and "--execute" not in c["argv"] for c in mac.node.calls())
+    for words in (["sample-create", "--spec=x"], ["sample-audit", "--order-no=YP1"], ["shop-goods", "--execute"],
+                  ["add", "--platform=DY"]):
+        with pytest.raises(site_.SiteError, match="只读"):
+            jst(words)
+    assert len(mac.node.calls()) == 2
 
 
 def test_real_stock_is_stock_minus_the_virtual_stock(worker):  # noqa: F811
