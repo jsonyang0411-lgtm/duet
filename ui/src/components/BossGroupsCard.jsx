@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { UsersThree, CheckCircle, X } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { pickBossGroup, ignoreBossGroup, bossGroupsLine } from '../lib/prm'
+import { pickBossGroup, ignoreBossGroup, bossGroupsLine, dealAction } from '../lib/prm'
 import { Card, Note, Confirm } from './ui'
 
 // 老板拉的群 (PRM_BOSS_GROUPS, src/prm/boss_groups.py; GET /api/prm ``boss_groups``): the boss (PRM_GROUP_WITH) made a
@@ -27,6 +27,12 @@ import { Card, Note, Confirm } from './ui'
 // 群自己接上 (PRM_GROUPS_AUTO_LINK, 2026-11-11): a group the bot's own scan found with two or more registered creators in
 // it is such a question too (``by`` "scan", no ``until``: it stays until answered): the same 「是她」 / 「不接」 (「不接」: the
 // scan leaves the group alone from then on).
+// 老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK, 2026-11-13; ``bg.pick``): a pending group with more than one person who
+// may be her is taken over by the bot itself (the group's name has one of them, or the first of her side to speak); each
+// such group nobody confirmed yet is a row of ``bg.picked``: the deal (its 称呼 from the group's name), the member it hangs
+// on and why, 「改挂到这位」 on each other member of her side (the same POST pick {chat, wxid}: the deal moves to that
+// member, and a person chose: confirmed) and 「是她的群」 (the deal action group_confirm). The admin's 「接群 <群名>」 of
+// such a group is a question here too (``rehook``): 「改挂到这位」 / 「不改」.
 
 /** 她那边的人 (PRM_GROUP_HER_SIDE, 2026-11-11; ``bg.her_side`` / ``bg.max`` from /api/prm): whose lines in a linked group
  *  are not drafted, said truly in both states. ``size``: the group's when known (over ``bg.max`` her side does not
@@ -74,7 +80,13 @@ export function BossGroupsCard({ d, onDone }) {
   const ignore = (g) => run(g, () => ignoreBossGroup(g.chat), `记下了：${named(g)}不是达人的群，机器人不管它`)
   const link = (g, m) => run(g, () => pickBossGroup(g.chat, m.wxid),
     `已接手${named(g)}：${m.name || m.wxid}${m.registered ? '' : ' 登记成达人'}，之后${draftedWho(bg, g.size)}在群里说的话会起草，在「待审批」里等你看`)
-  const drop = (g) => run(g, () => ignoreBossGroup(g.chat), `好的，${named(g)}不接了`)
+  const drop = (g) => run(g, () => ignoreBossGroup(g.chat), g.rehook ? `好的，${named(g)}不改了` : `好的，${named(g)}不接了`)
+  const rehook = (g, m) => run(g, () => pickBossGroup(g.chat, m.wxid),
+    `改好了：${named(g)}的合作单改挂在「${m.name || m.wxid}」身上，这个群也算确认过了`)
+  const confirm = (g) => run(g, () => dealAction({ deal_id: g.deal_id, action: 'group_confirm', chat: g.chat }),
+    `记下了：${named(g)}是她的群`)
+  const onManual = (g) => (m) => (g.rehook ? rehook(g, m) : link(g, m))
+  const picked = bg.picked || []
   if (!bg.enabled) {
     return (
       <Card title="合作群" eyebrow="GROUPS" className="prm-boss-groups"
@@ -83,7 +95,7 @@ export function BossGroupsCard({ d, onDone }) {
         <div className="stack" style={{ gap: 10 }}>
           {ours && <Note kind="warn"><span className="prm-ours-warning">{ours}</span></Note>}
           {manual.map((g) => (
-            <ManualGroupRow key={g.chat} g={g} bg={bg} disabled={!!busy} onPick={(m) => link(g, m)} onDrop={() => drop(g)} />
+            <ManualGroupRow key={g.chat} g={g} bg={bg} disabled={!!busy} onPick={onManual(g)} onDrop={() => drop(g)} />
           ))}
         </div>
       </Card>
@@ -94,7 +106,11 @@ export function BossGroupsCard({ d, onDone }) {
       sub={`老板${boss ? `（${boss}）` : ''}把他微信里的达人和我们这个号拉进的小群：之后由我们跟她对接`}>
       <div className="stack" style={{ gap: 10 }}>
         {manual.map((g) => (
-          <ManualGroupRow key={g.chat} g={g} bg={bg} disabled={!!busy} onPick={(m) => link(g, m)} onDrop={() => drop(g)} />
+          <ManualGroupRow key={g.chat} g={g} bg={bg} disabled={!!busy} onPick={onManual(g)} onDrop={() => drop(g)} />
+        ))}
+        {picked.map((g) => (
+          <PickedGroupRow key={g.chat} g={g} disabled={!!busy || !!bg.why_not} onMove={(m) => rehook(g, m)}
+            onConfirm={() => confirm(g)} />
         ))}
         {bg.why_not && <Note kind="warn">{bg.why_not}</Note>}
         {bg.warning && <Note kind="warn">{bg.warning}</Note>}
@@ -102,7 +118,9 @@ export function BossGroupsCard({ d, onDone }) {
         <div className="f-hint">
           群里除了老板和我们只有她一个人、而且看得出是新拉的群时，机器人自己接手：把她登记成达人，写一份在群里打招呼的开场白，等你在「待审批」里看过再发。
           之后她在群里说的话照常起草，和私聊的草稿一个规矩（先审、门槛、下班时段、自动模式都照旧），发在群里，老板也看得到；<span className="prm-others-line">{othersLine(bg, { boss: true })}</span>
-          {pending.some(unsure) && ' 群里不止一个人可能是她时，在下面点哪个是她。'}
+          {bg.pick
+            ? ' 群里不止一个人可能是她时（她本人、助理、商务…），机器人自己接手：群名里有其中一个人的名字就挂在这个人身上，不然挂在她那边第一个在群里说话的人身上；合作单的名字取群名，她那边的人说的话都一样起草，你确认以前这个群的草稿都等你看。'
+            : pending.some(unsure) && ' 群里不止一个人可能是她时，在下面点哪个是她。'}
         </div>
         <div className="prm-boss-counts">{bossGroupsLine(bg)}</div>
         {pending.map((g) => (
@@ -126,15 +144,17 @@ export function BossGroupsCard({ d, onDone }) {
 function ManualGroupRow({ g, bg, disabled, onPick, onDrop }) {
   const until = g.until ? `${fmtClock(g.until)} 前有效` : ''
   const scan = g.by === 'scan'                          // (群自己接上: the bot's own scan asks, not the admin's 「接群」)
+  const rehook = !!g.rehook                             // (老板拉的群里机器人自己选人: 「改挂到谁」)
   return (
     <div className="stack prm-boss-group prm-manual-group" style={{ gap: 6 }}>
       <div>
         <b><UsersThree style={{ verticalAlign: -2 }} /> {g.name || '（没有群名）'}</b>{' '}
-        <span className="dim">{[g.size ? `${g.size} 人` : '', scan ? (g.why ? '机器人看到的群：没自动接' : '机器人看到的群：里面不止一位登记过的达人，没自动接') : '你在微信里发的「接群」', until].filter(Boolean).join(' · ')}</span>
+        <span className="dim">{[g.size ? `${g.size} 人` : '', scan ? (g.why ? '机器人看到的群：没自动接' : '机器人看到的群：里面不止一位登记过的达人，没自动接') : rehook ? '你在微信里发的「接群」：改挂到谁' : '你在微信里发的「接群」', until].filter(Boolean).join(' · ')}</span>
       </div>
       {scan && g.why && <div className="f-hint prm-ask-why">为什么没自动接：{g.why}</div>}
       <div className="f-hint">
-        {g.three_party ? '这是她的三方群（「拉三方群」建的，现在只读）：点「是她」以后她在群里说的话会起草，回复发在群里。'
+        {rehook ? '机器人自己接手的老板拉的群：点哪位，合作单（名字不变）就改挂在 TA 身上，私聊只算 TA 的；群里她那边的人照旧都起草。也可以在微信里回「是 编号」。'
+          : g.three_party ? '这是她的三方群（「拉三方群」建的，现在只读）：点「是她」以后她在群里说的话会起草，回复发在群里。'
           : scan ? '点这个群是哪位达人的：机器人接手这个群，群里最近的话当背景，她在等回复就起草一份。不是合作群就点「不接」，机器人以后不再自己接它。'
             : `点哪个是达人（也可以是她的商务）：机器人接手这个群，群里最近的话当背景，她在等回复就起草一份；${othersLine(bg, { size: g.size })}也可以在微信里回「是 编号」。`}
       </div>
@@ -144,12 +164,43 @@ function ManualGroupRow({ g, bg, disabled, onPick, onDrop }) {
           {m.registered && <span className="tag cy">已登记</span>}
           {m.stopped && <span className="tag off">停用过</span>}
           <span className="mono dim">{m.wxid}</span>
-          <button type="button" className="btn sm primary" disabled={disabled} aria-label={`${m.name || m.wxid} 是她`}
-            onClick={() => onPick(m)}><CheckCircle />是她</button>
+          <button type="button" className="btn sm primary" disabled={disabled}
+            aria-label={`${m.name || m.wxid} ${rehook ? '改挂到这位' : '是她'}`}
+            onClick={() => onPick(m)}><CheckCircle />{rehook ? '改挂到这位' : '是她'}</button>
         </div>
       ))}
       <div>
-        <button type="button" className="btn sm ghost" disabled={disabled} onClick={onDrop}><X />不接</button>
+        <button type="button" className="btn sm ghost" disabled={disabled} onClick={onDrop}><X />{rehook ? '不改' : '不接'}</button>
+      </div>
+    </div>
+  )
+}
+
+/** 老板拉的群里机器人自己选人: a group the bot took over by choosing whom its deal hangs on, nobody confirmed yet: the deal
+ *  (its 称呼 from the group's name), the member it hangs on and why, 「改挂到这位」 on each other member of her side, and
+ *  「是她的群」. */
+function PickedGroupRow({ g, disabled, onMove, onConfirm }) {
+  const hook = g.hook?.name || '（没有名字）'
+  return (
+    <div className="stack prm-boss-group prm-picked-group" style={{ gap: 6 }}>
+      <div>
+        <b><UsersThree style={{ verticalAlign: -2 }} /> {g.name || '（没有群名）'}</b>{' '}
+        <span className="dim">{[g.size ? `${g.size} 人` : '', '机器人自己接手的，还没确认'].filter(Boolean).join(' · ')}</span>
+      </div>
+      <div className="f-hint prm-picked-hook">
+        合作单「{g.call}」挂在「{hook}」身上（{g.how}）。群里她那边的人说的话都一样起草，私聊只算挂着的这个人的；确认以前这个群的草稿都等你看。挂错了人就点另一位的「改挂到这位」。
+      </div>
+      {(g.members || []).map((m) => (
+        <div key={m.wxid} className="row prm-boss-member" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span>{m.name || '（没有名字）'}</span>
+          <span className="mono dim">{m.wxid}</span>
+          <button type="button" className="btn sm" disabled={disabled} aria-label={`${m.name || m.wxid} 改挂到这位`}
+            onClick={() => onMove(m)}><CheckCircle />改挂到这位</button>
+        </div>
+      ))}
+      <div>
+        <button type="button" className="btn sm primary" disabled={disabled || !g.deal_id} onClick={onConfirm}>
+          <CheckCircle />是她的群</button>
       </div>
     </div>
   )

@@ -1166,7 +1166,9 @@ def _boss_groups_stopped_status(store) -> dict:
                            boss=group_with(os.getenv("PRM_GROUP_WITH", "")), reserved=_prm_reserved(),
                            boss_call=boss_call(os.getenv("PRM_BOSS_CALL", "")),
                            ours=group_ours(os.getenv("PRM_GROUP_OURS", "")),
-                           her_side=_prm_env_on("PRM_GROUP_HER_SIDE"), group_max=most)
+                           her_side=_prm_env_on("PRM_GROUP_HER_SIDE"), group_max=most,
+                           # (2026-11-13: 老板拉的群里机器人自己选人, as the running bot's ``pick_on``)
+                           pick=on and _prm_env_on("PRM_BOSS_GROUP_PICK") and _prm_env_on("PRM_GROUP_HER_SIDE"))
 
 
 def _prm_boss_groups(data: dict, action: str) -> dict:

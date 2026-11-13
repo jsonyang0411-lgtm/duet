@@ -431,6 +431,13 @@ class BotConfig:
     # "off" (the default): nothing of it.
     prm_boss_groups: str = "off"
     prm_boss_group_max: int = 6
+    # 老板拉的群里机器人自己选人 (src/prm/boss_groups.py ``_pick_pending``, 2026-11-13; the user: 「我是觉得有点多余」): "on"
+    # (with prm_boss_groups and prm_group_her_side on): a 老板拉的群 that waits for 「是她」 only because more than one
+    # person besides us and the boss may be her is taken over by the scan itself: the deal hangs on the one member whose
+    # name the group's name has (exactly one), else on the first of her side to speak there, else it waits until one
+    # speaks; the deal's 称呼 comes from the group's name.  Every draft there (and of that member's private chat) waits
+    # for a person until one confirms; the admin is told once in WeChat.  "off" (the default): the console's 「是她」.
+    prm_boss_group_pick: str = "off"
     # What the Mac is told the boss is called (1-10 characters): the boss's names (PRM_GROUP_WITH) never leave this PC;
     # a group job says this instead (its ``meta.group.boss``, and in the group's name and the lines it is told).
     prm_boss_call: str = "老板"
@@ -460,6 +467,12 @@ class BotConfig:
     # her latest line in private, or none: as before.  Decided when the message is made.  "off" (the default): her private
     # chat when she has one, else the group, as before.
     prm_reach_last_spoke: str = "off"
+    # 群里的话都先审 (PrmService._hand_hold, 2026-11-13; the user: 「群里的消息都经过审批再发…私信依旧可以自动回复」): "on":
+    # nothing goes into a group chat by itself: every draft for a group (a 老板拉的群, one linked by hand or by the scan,
+    # confirmed or not, her own line's or her side's, and what the bot starts itself there: a shipping notice, a 专属佣金
+    # / 专属链接 step, an opening, 补发货盘, 做手卡, 签收后问一句) waits in 待审批 whatever the gates, 下班时段, 自动模式,
+    # 开场白自动发 and prm_linked_groups_auto say.  Private chats as before.  "off" (the default): as before.
+    prm_groups_review: str = "off"
     # 我们自己的人 (src/prm/boss_groups.py, 2026-11-11): the names of our own people (colleagues) in creators' groups, by
     # their names in this account's contacts (their 备注), comma-separated, at most 10 (this PC's .env only, never the
     # repo), resolved as PRM_GROUP_WITH's bosses are: never "who is she" (the scan, 接群, the boss scan), never her side
@@ -717,6 +730,9 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_BOSS_GROUPS must be off or on, got {kwargs.get('prm_boss_groups')}")
     if not (3 <= int(kwargs.get("prm_boss_group_max", 6)) <= 20):
         errors.append(f"PRM_BOSS_GROUP_MAX must be between 3 and 20, got {kwargs.get('prm_boss_group_max')}")
+    # (on without PRM_BOSS_GROUPS or PRM_GROUP_HER_SIDE it only does nothing: the console and 「接群」 say why)
+    if kwargs.get("prm_boss_group_pick", "off") not in ("off", "on"):
+        errors.append(f"PRM_BOSS_GROUP_PICK must be off or on, got {kwargs.get('prm_boss_group_pick')}")
     boss_call = " ".join(str(kwargs.get("prm_boss_call", "老板") or "").split())
     if not 1 <= len(boss_call) <= 10:
         errors.append(f"PRM_BOSS_CALL must be 1 to 10 characters, got {len(boss_call)}")
@@ -734,6 +750,8 @@ def _validate_config(kwargs: dict) -> None:
         errors.append("PRM_GROUP_OURS: each name must be 1-20 characters with a letter, a digit or a Chinese character")
     if kwargs.get("prm_reach_last_spoke", "off") not in ("off", "on"):
         errors.append(f"PRM_REACH_LAST_SPOKE must be off or on, got {kwargs.get('prm_reach_last_spoke')}")
+    if kwargs.get("prm_groups_review", "off") not in ("off", "on"):
+        errors.append(f"PRM_GROUPS_REVIEW must be off or on, got {kwargs.get('prm_groups_review')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -898,11 +916,13 @@ def load_config() -> BotConfig:
         "prm_group_name": os.getenv("PRM_GROUP_NAME", "").strip() or "{品牌}×{昵称}",
         "prm_boss_groups": _parse_switch(os.getenv("PRM_BOSS_GROUPS", "off")),
         "prm_boss_group_max": int(os.getenv("PRM_BOSS_GROUP_MAX", "6")),
+        "prm_boss_group_pick": _parse_switch(os.getenv("PRM_BOSS_GROUP_PICK", "off")),
         "prm_boss_call": " ".join(os.getenv("PRM_BOSS_CALL", "").split()) or "老板",
         "prm_linked_groups_auto": _parse_switch(os.getenv("PRM_LINKED_GROUPS_AUTO", "off")),
         "prm_groups_auto_link": _parse_switch(os.getenv("PRM_GROUPS_AUTO_LINK", "off")),
         "prm_group_her_side": _parse_switch(os.getenv("PRM_GROUP_HER_SIDE", "off")),
         "prm_reach_last_spoke": _parse_switch(os.getenv("PRM_REACH_LAST_SPOKE", "off")),
+        "prm_groups_review": _parse_switch(os.getenv("PRM_GROUPS_REVIEW", "off")),
         "prm_group_ours": os.getenv("PRM_GROUP_OURS", "").strip(),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),

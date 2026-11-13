@@ -833,7 +833,8 @@ class DealCommands:
             exact = bool(name) and name == raw and len(raw) < NAME_CHARS     # (a kept name of NAME_CHARS: maybe cut)
             group = f"群「{name}」" if name else "一个没有群名的群"
             how = f"回「确认接群 {name}」" if exact else "到控制台她的合作单上点「是她的群」"
-            out.append(f"{group}是机器人自动接的，还没人确认是她的群：那里的草稿都等你看；对的话{how}")
+            what = "是机器人自己选人接手的老板拉的群" if row.get("picked") else "是机器人自动接的"   # (PRM_BOSS_GROUP_PICK)
+            out.append(f"{group}{what}，还没人确认是她的群：那里的草稿都等你看；对的话{how}")
         return out
 
     def _waiting(self, party: dict, deal: dict) -> str:

@@ -529,13 +529,17 @@ function reachText(r) {
 }
 
 /** 群自己接上 (review 2026-11-11 #2): a group the scan linked by itself that nobody confirmed: every draft there waits;
- *  「是她的群」 confirms it (deal action ``group_confirm``; the admin's 「确认接群 群名」 and a draft sent by a person do too). */
+ *  「是她的群」 confirms it (deal action ``group_confirm``; the admin's 「确认接群 群名」 and a draft sent by a person do too).
+ *  老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK, 2026-11-13): a 老板拉的群 the scan took over by choosing whom the deal
+ *  hangs on (``picked``: why) is one too; who it hangs on is changed on the 老板拉的群 card at the page's top. */
 function UnconfirmedGroups({ groups, busy, run }) {
   return (
     <div className="stack prm-unconfirmed-groups" style={{ gap: 6 }}>
       {groups.map((g) => (
         <div key={g.chat} className="row prm-unconfirmed-group" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <span className="f-hint">「{g.name || '（没有群名）'}」是机器人自动接的，还没人确认是她的群：确认以前这个群的草稿都等你看过再发。</span>
+          <span className="f-hint">{g.picked
+            ? `「${g.name || '（没有群名）'}」是机器人自己选人接手的老板拉的群（${g.picked}），还没人确认：确认以前这个群的草稿都等你看过再发；挂错了人到页顶「老板拉的群」里改挂。`
+            : `「${g.name || '（没有群名）'}」是机器人自动接的，还没人确认是她的群：确认以前这个群的草稿都等你看过再发。`}</span>
           <button type="button" className="btn sm" disabled={busy}
             onClick={() => run({ action: 'group_confirm', chat: g.chat }, `记下了：「${g.name || '这个群'}」是她的群`)}>是她的群</button>
         </div>

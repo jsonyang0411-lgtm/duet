@@ -103,6 +103,22 @@ boss, the admin, a cc user) and no registered creator (``her_side``) is drafted 
 ``_group_message``): her assistant, her 商务.  A job of such a group says so (``job_group``: ``her_side`` True) and each
 such line is marked HER_SIDE_MARK in the job's text; that person's name never goes to the Mac.  Only in a group of at
 most PRM_BOSS_GROUP_MAX members: in a bigger one (an operator may link one by hand) the others stay context.
+
+老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK, default off, with PRM_BOSS_GROUPS and PRM_GROUP_HER_SIDE on; 2026-11-13,
+the user: 「不是改为了群里所有的人都当达人吗」, 「我是觉得有点多余」, 「一个群里全是他的不同助手负责不同工作也要专门指定一个是达人吗」):
+a 老板拉的群 that waits for 「是她」 only because more than one person may be her (pending, no reason of its own, certainly
+new, every name known, nobody there a registered or stopped creator) is taken over by the scan itself (``_pick_pending``):
+the deal hangs on the one member whose name the group's name has (``title_has``, after our brand, the bosses' and our own
+people's names and TITLE_WORDS are taken out; two of them: no match), else on the first of them to speak there since we
+were added (``_first_speaker``), else it waits until one speaks.  Her side is drafted alike, so that member is only the
+deal's hook (its wxid: the private chat that counts, recalls, "is she still there"); the deal's 称呼 is the group's name
+cleaned (``title_call``; too little left: that member's name).  The row keeps how (``picked``); until a person confirms
+it (as a group the scan linked by itself: ``unconfirmed``, ``confirm``) every draft there waits (PrmService
+``_hand_hold``); what was said there lately is read once as for such a group (``catch_up``); the admin is told once
+(PICKED_NOTICE).  A wrong hook: ``rehook`` (「接群 <群名>」 then 「是 N」, ``rehook_offer``; the console card's 「改挂」,
+``pick``): the deal's party gets that member's wxid, nothing else of the deal changes.  The hook left the group: the deal
+moves to another of her side by the same rules (``_rehook_left``, REHOOKED_NOTICE), or the deal says so until one speaks.
+「接群 <群名>」 of a group still waiting says why (``waiting_why``).
 """
 
 from __future__ import annotations
@@ -113,6 +129,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from collections import OrderedDict, deque
 from contextlib import nullcontext
 from typing import Callable, Optional
@@ -240,6 +257,30 @@ OURS_MAX = 10
 OURS_UNKNOWN_WHY = "PRM_GROUP_OURS 里的{names}在这个微信里找不到 / 有重名"
 OURS_UNREAD_WHY = "PRM_GROUP_OURS 里的名字还没认出来（微信数据库还没读到）"
 OURS_HOLD = "：认出来以前，机器人不自己接群、不自己接手老板拉的群（认得出是谁的群也先问你）"
+# 老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK, 2026-11-13; the user: 「不是改为了群里所有的人都当达人吗」, 「我是觉得有点
+# 多余」): a 老板拉的群 that waits for 「是她」 only because more than one person may be her (her assistant, her 商务…) is
+# taken over by the scan itself (``_pick_pending``).  With PRM_GROUP_HER_SIDE on everybody of her side there is drafted
+# alike: the member the deal hangs on (its wxid: her private chat, recalls, "is she still there") is only a hook, and the
+# deal's 称呼 comes from the group's name (``title_call``).  ``boss_groups.picked`` says how the hook was chosen
+PICK_TITLE, PICK_FIRST = "title", "first"
+PICK_HOW = {PICK_TITLE: "群名里有她的名字", PICK_FIRST: "她那边第一个在群里说话的人"}
+PICK_WAIT_WHY = ("群里不止一个人可能是她，群名里也认不出是谁：等她那边有人在群里说话，机器人就自己接手（合作单挂在第一个说话的人"
+                 "身上）：等不及就点「是她」")
+PICK_OFF_WHY = "群里不止一个人可能是她，机器人不猜（PRM_BOSS_GROUP_PICK 关着）"
+PICK_SIDE_WHY = ("群里不止一个人可能是她；PRM_BOSS_GROUP_PICK 开着，但 PRM_GROUP_HER_SIDE 关着：机器人自己选人要两个都开"
+                 "（不然只有挂着的那个人的话起草）")
+PICK_REGISTERED_WHY = "群里有登记过（或停用过）的达人，机器人不替你选"
+PICKED_NOTICE, REHOOKED_NOTICE = "picked", "rehooked"           # ``notice``'s kinds of it
+# ... the deal's notice when the member it hangs on left and nobody else of her side can be chosen yet (``_rehook_left``)
+PICK_LEFT_TEXT = ("合作单挂着的那个人已经不在这个老板拉的群里了：她那边别的人说的话照常起草；机器人自己发的消息（发货通知等）先不发到"
+                  "这个群。她那边有人在群里说话以后，机器人把合作单改挂到那个人身上")
+REHOOK_LEFT, REHOOK_CONSOLE = "left", "console"                 # why the deal moved to another member (``rehook``)
+# What a group's name is cleaned of before it is compared with a member's name and becomes the deal's 称呼 (besides our
+# brand, PRM_FRIEND_ADD_BRAND, and the bosses' and our own people's names): the platforms' and the cooperation's words;
+# it is cut into pieces at every character that is no letter or digit and at 和 / 与 / 跟 (``title_parts``)
+TITLE_WORDS = ("小红书", "视频号", "抖音", "快手", "淘宝", "天猫", "京东", "微信", "达人", "主播", "博主", "合作", "对接", "沟通",
+               "交流", "商务", "带货", "直播", "选品", "寄样", "样品", "项目", "工作", "官方", "品牌", "群聊", "群")
+_TITLE_SPLIT = re.compile(r"[\W_和与跟]+")
 
 
 def mask_name(text) -> str:
@@ -307,6 +348,43 @@ def _num(value) -> Optional[float]:
         return None
 
 
+def title_parts(text, drop=()) -> list[str]:
+    """老板拉的群里机器人自己选人: a group's (or a member's) name as the pick reads it: NFKC (full-width letters as
+    half-width), each of ``drop`` (our brand, the bosses' and our own people's names: two characters or more, spaces and
+    case aside) and of TITLE_WORDS taken out, then cut at every character that is no letter or digit (& × · brackets,
+    spaces, emoji…) and at 和 / 与 / 跟: the pieces left, in order (as written: case kept)."""
+    text = unicodedata.normalize("NFKC", str(text or ""))
+    names = {"".join(unicodedata.normalize("NFKC", str(n or "")).split()) for n in drop or ()}
+    words = sorted({n for n in names if len(n) >= 2} | set(TITLE_WORDS), key=len, reverse=True)
+    pattern = "|".join(r"\s*".join(re.escape(ch) for ch in w) for w in words)
+    text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+    return [p for p in _TITLE_SPLIT.split(text) if p]
+
+
+def title_call(parts) -> str:
+    """The deal's 称呼 from a group's name (``title_parts``): its pieces with a space between, at most NAME_MAX
+    characters; "" when nothing usable is left (under two characters, or digits only: the hook's own name then)."""
+    joined = "".join(parts or ())
+    if len(joined) < 2 or joined.isdigit():
+        return ""
+    return " ".join(parts)[:NAME_MAX].strip()
+
+
+def _pairs(parts) -> set:
+    """The two-character runs inside each piece (never across two pieces), case folded, none of digits only."""
+    out = set()
+    for piece in parts or ():
+        piece = str(piece).casefold()
+        out |= {piece[i:i + 2] for i in range(len(piece) - 1) if not piece[i:i + 2].isdigit()}
+    return out
+
+
+def title_has(parts, name, drop=()) -> bool:
+    """Does the group's name (its ``title_parts``) have this member's ``name`` in it: a run of two characters or more
+    the two share (cleaned alike: ``drop``, TITLE_WORDS), not of digits only?"""
+    return bool(_pairs(parts) & _pairs(title_parts(name, drop)))
+
+
 def her_name(name, wxid: str, fallback: str = "老板介绍") -> str:
     """The 称呼 she is registered with: her name as this account sees her (white space and fillers collapsed, at most 30
     characters), 「老板介绍 <wxid 前 8 位>」 without one (``fallback``: a group linked by hand, MANUAL_FALLBACK)."""
@@ -336,7 +414,9 @@ def offer_out(offer: Optional[dict]) -> Optional[dict]:
             **({"why": str(offer["why"])} if scan and offer.get("why") else {}),
             "members": [{"wxid": m["wxid"], "name": m.get("name") or "", "registered": bool(m.get("registered")),
                          "stopped": bool(m.get("stopped"))} for m in offer["members"]],
-            **({"by": SCAN} if scan else {})}
+            **({"by": SCAN} if scan else {}),
+            # (老板拉的群里机器人自己选人: 「接群 <群名>」 of a group the scan took over so asks 「改挂到谁」)
+            **({"rehook": True} if offer.get("rehook") else {})}
 
 
 def clean_members(raw, own: str = "") -> list[dict]:
@@ -376,7 +456,8 @@ def told_lines(group) -> list[int]:
 
 def boss_groups_out(store, *, enabled: bool, why_not: str = "", boss=(), reserved=(),
                     boss_call: str = CALL_DEFAULT, warning: str = "", offer: Optional[dict] = None, asks=(),
-                    ours=(), ours_warning: str = "", her_side: bool = False, group_max: int = MAX_DEFAULT) -> dict:
+                    ours=(), ours_warning: str = "", her_side: bool = False, group_max: int = MAX_DEFAULT,
+                    pick: bool = False) -> dict:
     """What the console shows (GET /api/prm ``boss_groups``; also the stopped bot's, from .env): on or off, why it cannot
     run at all now (``why_not``: the console's buttons are off then), what it warns of while it runs (``warning``, ""
     when nothing: a name of PRM_GROUP_WITH no one contact has, so no group is taken over by itself; the buttons stay
@@ -392,14 +473,28 @@ def boss_groups_out(store, *, enabled: bool, why_not: str = "", boss=(), reserve
     and what the bot warns of them (``ours_warning``: a name no one contact has, or not read yet), each key only when
     there is one, whatever ``enabled`` says.  她那边的人 (PRM_GROUP_HER_SIDE on): ``her_side`` True and ``max``
     (PRM_BOSS_GROUP_MAX: a bigger group's others stay context), so that the console's hints say whose lines are drafted;
-    no key at all with it off."""
+    no key at all with it off.  老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK with PRM_GROUP_HER_SIDE, ``pick``):
+    ``pick`` True, a pending group with no reason of its own and more people who may be her says it waits for one of
+    them to speak (PICK_WAIT_WHY), and the groups the scan took over so that nobody confirmed yet are ``picked``
+    (``picked_out``: whom the deal hangs on and why, the others of her side, each a 「改挂」 on the card); no key with
+    it off."""
     rows = store.boss_groups() if store is not None and enabled else []
     rows = [r for r in rows if not r.get("manual")]
-    pending = [{"chat": r["chat"], "name": r["name"], "found_at": r["found_at"], "why": r["why"],
-                "size": len(r["members"]) + 1,
-                "members": [{"wxid": m["wxid"], "name": m.get("name") or ""}
-                            for m in candidates(r["members"], {b.get("wxid") for b in r["boss"]}, reserved, boss)]}
-               for r in rows if r["state"] == PENDING]
+
+    def why_of(r: dict, people: list) -> str:
+        if r["why"] or not pick or len(people) < 2:
+            return r["why"]
+        registered = any(store.party_by_wxid(m["wxid"], include_inactive=True) is not None for m in people)
+        return "" if registered else PICK_WAIT_WHY
+
+    pending = []
+    for r in rows:
+        if r["state"] != PENDING:
+            continue
+        people = candidates(r["members"], {b.get("wxid") for b in r["boss"]}, reserved, boss)
+        pending.append({"chat": r["chat"], "name": r["name"], "found_at": r["found_at"], "why": why_of(r, people),
+                        "size": len(r["members"]) + 1,
+                        "members": [{"wxid": m["wxid"], "name": m.get("name") or ""} for m in people]})
     out = {"enabled": bool(enabled), "why_not": str(why_not or "") if enabled else "",
            "warning": str(warning or "") if enabled else "", "boss": list(boss),
            "boss_call": str(boss_call or CALL_DEFAULT), "pending": pending,
@@ -418,7 +513,28 @@ def boss_groups_out(store, *, enabled: bool, why_not: str = "", boss=(), reserve
         out["ours_warning"] = str(ours_warning)
     if her_side:
         out.update(her_side=True, max=int(group_max))
+    if pick:
+        out["pick"] = True
+    picked = [picked_out(store, r, reserved, boss) for r in rows
+              if r["state"] == LINKED and r.get("picked") and r.get("confirmed_at") is None]
+    if picked:
+        out["picked"] = picked
     return out
+
+
+def picked_out(store, row: dict, reserved=(), boss=()) -> dict:
+    """A group the scan took over by choosing whom the deal hangs on, nobody confirmed yet, as the console's card shows it:
+    the group, the deal (``deal_id``, its 称呼 ``call``), the member it hangs on (``hook``: wxid, name as this account
+    sees them), why (``how``: ``PICK_HOW``'s words) and the others of her side (``members``: each a 「改挂」)."""
+    party = store.party(int(row.get("party_id") or 0)) if row.get("party_id") else None
+    her = str((party or {}).get("wxid") or "")
+    people = candidates(row["members"], {b.get("wxid") for b in row["boss"]}, reserved, boss)
+    hook = next((m for m in row["members"] if m.get("wxid") == her), None)
+    return {"chat": row["chat"], "name": row["name"], "size": len(row["members"]) + 1,
+            "deal_id": row.get("deal_id"), "call": str((party or {}).get("name") or ""),
+            "how": PICK_HOW.get(str(row.get("picked") or ""), ""),
+            "hook": {"wxid": her, "name": str((hook or {}).get("name") or "")},
+            "members": [{"wxid": m["wxid"], "name": m.get("name") or ""} for m in people if m["wxid"] != her]}
 
 
 def _clock_text(at) -> str:
@@ -459,8 +575,14 @@ class BossGroups:
                  catch_up: Optional[Callable[[dict, str, float], Optional[dict]]] = None,
                  on_close: Optional[Callable[[str, float], int]] = None,
                  notice: Optional[Callable[[str, dict], str]] = None,
-                 tell: Optional[Callable[[str], Optional[bool]]] = None):
+                 tell: Optional[Callable[[str], Optional[bool]]] = None,
+                 hook_busy: Optional[Callable[[dict], str]] = None,
+                 parties_changed: Optional[Callable[[], None]] = None):
         self._store = store
+        # 老板拉的群里机器人自己选人 (``rehook``): why the member a deal hangs on cannot be changed now ("" = it can:
+        # PrmService._hook_busy, her private chat has a draft on its way) and what is told the registered wxids changed
+        self._hook_busy = hook_busy
+        self._parties_changed = parties_changed
         self._config = config
         self._clock = clock
         self._local = local if local is not None else (lambda at: at)
@@ -477,6 +599,11 @@ class BossGroups:
         # 群自己接上 / 她那边的人 (2026-11-11; a config object without them, an older caller's: off)
         self._auto = str(getattr(config, "prm_groups_auto_link", "off") or "off").strip().lower() == "on"
         self._her_side = str(getattr(config, "prm_group_her_side", "off") or "off").strip().lower() == "on"
+        # 老板拉的群里机器人自己选人 (2026-11-13): the switch, our brand (taken out of a group's name, ``title_parts``), and
+        # each pending group's session time when its lines were last read for who spoke first (``_first_speaker``)
+        self._pick = str(getattr(config, "prm_boss_group_pick", "off") or "off").strip().lower() == "on"
+        self._brand = " ".join(str(getattr(config, "prm_friend_add_brand", "") or "").split())
+        self._pick_seen: dict[str, Optional[float]] = {}
         self._with = group_with(getattr(config, "prm_group_with", ""))
         # 我们自己的人 (PRM_GROUP_OURS): their names; their wxids as last read (``_read_bosses``, with the bosses'); the
         # names no one contact has (all of them until they are read: fail safe)
@@ -541,7 +668,12 @@ class BossGroups:
             except ValueError:
                 raw = {}
             if isinstance(raw, dict) and raw.get("owed"):
-                store.set_meta_value(AUTO_STATE, json.dumps({**raw, "owed": []}, ensure_ascii=False, sort_keys=True))
+                # (老板拉的群里机器人自己选人: the lines about a group the boss scan took over so stay owed, PRM_BOSS_GROUP_PICK)
+                picked = {r["chat"] for r in store.boss_groups((LINKED,)) if r.get("picked")} if self._pick else set()
+                kept = [i for i in raw["owed"] if isinstance(i, (list, tuple)) and len(i) == 2 and i[0] in picked]
+                if kept != raw["owed"]:
+                    store.set_meta_value(AUTO_STATE, json.dumps({**raw, "owed": kept}, ensure_ascii=False,
+                                                                sort_keys=True))
         rows = store.boss_groups((LINKED,))
         live = [r for r in rows if r.get("party_id") and (self._on or r.get("manual"))]
         self._linked = {r["chat"]: int(r["party_id"]) for r in live}
@@ -583,6 +715,12 @@ class BossGroups:
     def her_side_on(self) -> bool:
         """PRM_GROUP_HER_SIDE is on (``her_side``)."""
         return self._her_side
+
+    @property
+    def pick_on(self) -> bool:
+        """老板拉的群里机器人自己选人 runs: PRM_BOSS_GROUP_PICK on, with PRM_BOSS_GROUPS and PRM_GROUP_HER_SIDE (with her
+        side off only the one member the deal hangs on would be drafted: a wrong choice would silence the group)."""
+        return self._pick and self._on and self._her_side
 
     @property
     def call(self) -> str:
@@ -648,7 +786,8 @@ class BossGroups:
         return boss_groups_out(self._store, enabled=self._on, why_not=self.why_not() if self._on else "",
                                boss=self._with, reserved=self._reserved, boss_call=self._call, warning=self.warning(),
                                offer=self.offered(), asks=list(self._asks.values()), ours=self._ours_names,
-                               ours_warning=self.ours_warning(), her_side=self._her_side, group_max=self._max)
+                               ours_warning=self.ours_warning(), her_side=self._her_side, group_max=self._max,
+                               pick=self.pick_on)
 
     # ── what the PRM service asks (any thread; no lock of this class is taken) ──
 
@@ -691,18 +830,30 @@ class BossGroups:
     def unconfirmed(self, chat: str) -> bool:
         """群自己接上 (review 2026-11-11 #2): is this a group the scan linked by itself that the bot drafts in and nobody
         confirmed yet (its row's ``confirmed_at``: a draft there sent by a person, 「确认接群」, the console's 「是她的群」)?
-        Every draft there waits for a person then, PRM_LINKED_GROUPS_AUTO or not (PrmService ``_hand_hold``)."""
+        Every draft there waits for a person then, PRM_LINKED_GROUPS_AUTO or not (PrmService ``_hand_hold``).
+        老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK): a 老板拉的群 the scan took over by choosing whom the deal hangs on
+        (its row's ``picked``) is one too, until a person confirms it the same ways."""
         chat = str(chat or "")
         if not chat.endswith("@chatroom") or chat not in self._linked:
             return False
         row = self._store.boss_group(chat)
-        return bool(row and row.get("manual") == AUTO and row.get("confirmed_at") is None)
+        return bool(row and (row.get("manual") == AUTO or (row.get("picked") and not row.get("manual")))
+                    and row.get("confirmed_at") is None)
+
+    def picked(self, chat: str) -> str:
+        """How the scan chose whom the deal of this 老板拉的群 hangs on (PICK_TITLE / PICK_FIRST; "" when it did not:
+        one person there, a person's 「是她」, a group linked by hand)."""
+        chat = str(chat or "")
+        row = self._store.boss_group(chat) if chat.endswith("@chatroom") else None
+        return str(row.get("picked") or "") if row and not row.get("manual") else ""
 
     def unconfirmed_of(self, deal_id) -> list:
         """The groups of this deal the scan linked by itself that nobody confirmed yet (``unconfirmed``):
-        ``[{"chat", "name"}]`` (the console's 「是她的群」)."""
-        return [{"chat": r["chat"], "name": r["name"]} for r in self._store.boss_groups((LINKED,), deal_id=deal_id)
-                if self.unconfirmed(r["chat"])]
+        ``[{"chat", "name"}]`` (the console's 「是她的群」); one the scan took over by choosing whom the deal hangs on
+        (老板拉的群里机器人自己选人) has ``picked`` too (PICK_TITLE / PICK_FIRST)."""
+        return [{"chat": r["chat"], "name": r["name"],
+                 **({"picked": str(r["picked"])} if r.get("picked") and not r.get("manual") else {})}
+                for r in self._store.boss_groups((LINKED,), deal_id=deal_id) if self.unconfirmed(r["chat"])]
 
     def confirm(self, chat, *, actor: str = "console", how: str = "") -> dict:
         """A person says a group the scan linked by itself is hers (``how``: "sent", a draft of it a person sent; else
@@ -710,17 +861,21 @@ class BossGroups:
         deal's record says so.  ``{"ok": True, "chat", "name", "party_id", "deal_id"}`` or ``{"ok": False, "error"}``."""
         chat = str(chat or "")
         row = self._store.boss_group(chat)
-        if row is None or row.get("state") != LINKED or chat not in self._linked or row.get("manual") != AUTO:
+        picked = bool(row and row.get("picked") and not row.get("manual"))
+        if (row is None or row.get("state") != LINKED or chat not in self._linked
+                or (row.get("manual") != AUTO and not picked)):
             return {"ok": False, "error": "这个群不是机器人自动接的群（或者已经不接了）"}
         out = {"ok": True, "chat": chat, "name": row["name"], "party_id": row.get("party_id"),
-               "deal_id": row.get("deal_id")}
+               "deal_id": row.get("deal_id"), **({"picked": True} if picked else {})}
         if row.get("confirmed_at") is not None:
             return {**out, "already": True}
         now = self._clock()
         self._store.update_boss_group(chat, now, states=(LINKED,), confirmed_at=now)
         if row.get("deal_id"):
+            # (老板拉的群里机器人自己选人: ``picked`` instead of ``manual`` / ``auto``: it is a 老板拉的群, PrmService.event_out)
+            what = {"picked": str(row["picked"])} if picked else {"manual": True, "auto": True}
             self._store.add_event(int(row["deal_id"]), int(row.get("party_id") or 0), EVENT,
-                                  {"name": row["name"], "chat": chat, "manual": True, "auto": True, "confirmed": True,
+                                  {"name": row["name"], "chat": chat, **what, "confirmed": True,
                                    **({"how": how} if how else {})},
                                   actor=actor if actor in ("console", "admin") else "system", now=now)
         logger.info("PRM: group %s… the scan linked: confirmed (%s)", chat[:8], how or actor)
@@ -1162,8 +1317,11 @@ class BossGroups:
         for group in reversed(list(found)):    # (newest first from the backend: the oldest is seen to first)
             taken += self._found(group, own, now) if isinstance(group, dict) else 0
         taken += self._look_again(own, now)
+        taken += self._pick_pending(own, now)  # 老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK)
         self._look_at_linked(own, now)
         self._openings(now)
+        if self._pick and self._auto_state()["owed"]:
+            self._auto_tell(self._auto_state())   # (its lines for the admin's chat, as 群自己接上's go: ``_auto_tell``)
         return taken
 
     def _names(self) -> list[str]:
@@ -1448,6 +1606,168 @@ class BossGroups:
                 taken += int(bool(self.take_over(chat, people[0]["wxid"], people[0]["name"], actor="system").get("ok")))
         return taken
 
+    # ── 老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK, 2026-11-13) ─────────────
+
+    def _pick_pending(self, own: str, now: float) -> int:
+        """The pending groups that wait for 「是她」 only because more than one person besides us and the bosses may be her
+        (certainly new, no reason of their own, every name of PRM_GROUP_WITH and PRM_GROUP_OURS known): each is taken
+        over by the scan itself when it can tell whom to hang the deal on (``_pick_one``).  Anything else that waits
+        (not sure it is new, a stopped creator, a name not known, a registered creator in it…) keeps waiting for a
+        person, as before.  Returns how many were taken over."""
+        if not self.pick_on or self._unknown or self._ours_unknown:
+            return 0
+        rows = [r for r in self._store.boss_groups((PENDING,)) if not r.get("manual") and not r.get("why")
+                and self._sure(r)]
+        if not rows:
+            return 0
+        listed = self._listed_groups()
+        taken = 0
+        for row in rows:
+            try:
+                taken += self._pick_one(row, listed.get(row["chat"]), own, now)
+            except Exception:                  # (one group's trouble never stops the others': looked at again)
+                logger.exception("PRM: boss group %s…: the scan could not choose whom it hangs on; again at the next one",
+                                 row["chat"][:8])
+        return taken
+
+    def _listed_groups(self) -> dict:
+        """chat -> ``{"name", "last_at"}`` of the session list's groups now (the backend's ``recent_groups`` without
+        sizes: two database calls): a group's name as it is now (the boss may have named it after we found it) and when
+        something was said in it last.  {} when it cannot be listed (the names as kept then, the lines read each scan)."""
+        read = getattr(self._backend, "recent_groups", None)
+        if not callable(read):
+            return {}
+        try:
+            listed = read(0, sizes=False)
+        except Exception:
+            logger.debug("PRM: boss groups: the groups could not be listed for the pick", exc_info=True)
+            return {}
+        return {str(g["chat"]): g for g in listed or [] if isinstance(g, dict) and g.get("chat")}
+
+    def _drop_words(self, row: dict, members: list, own_name: str = "") -> list:
+        """What a group's name is cleaned of besides TITLE_WORDS (``title_parts``): our brand (PRM_FRIEND_ADD_BRAND), the
+        bosses' names (PRM_GROUP_WITH, the row's), our own people's (PRM_GROUP_OURS), this account's name in the group,
+        and the names the members who are bosses, ours, the admin or a cc user go by there."""
+        ids, _ = self._not_her(row)
+        named = [m.get("name") for m in members if m.get("wxid") in ids or m.get("wxid") in self._reserved]
+        return [self._brand, *self._with, *self._ours_names, *(b.get("name") for b in row.get("boss") or []),
+                own_name, *named]
+
+    def _pick_one(self, row: dict, info: Optional[dict], own: str, now: float) -> int:
+        """One such group (``info``: the session list's ``{"name", "last_at"}`` of it, or None): its members read now
+        (kept, and its name as WeChat gives it now); nobody who may be her is a registered or stopped creator (else a
+        person says whose it is, as before); then whom the deal hangs on (``_choose``): taken over with her (``take_over``
+        with ``picked``: the deal's 称呼 from the group's name, ``title_call``; every draft waits until a person
+        confirms it) and the admin is told once (PICKED_NOTICE).  Returns 1 when it was taken over."""
+        chat = row["chat"]
+        read = getattr(self._backend, "group_members", None)
+        raw = read(chat) if callable(read) else None
+        if raw is None:
+            return 0                           # (not readable now: at the next scan)
+        own_name = next((str(m.get("name") or "") for m in raw if isinstance(m, dict) and m.get("wxid") == own), "")
+        members = clean_members(raw, own)
+        if not members:
+            return 0
+        self._ask_again(members)
+        name = str((info or {}).get("name") or "")[:NAME_CHARS] or row["name"]
+        fields = {}
+        if members != row["members"]:
+            fields.update(members=members, boss=self._present(members) or row["boss"])
+        if name != row["name"]:
+            fields["name"] = name
+        if fields:
+            self._store.update_boss_group(chat, now, states=(PENDING,), **fields)
+            row = {**row, **fields}
+        ids, never = self._not_her(row)
+        people = candidates(members, ids, self._reserved, never)
+        if not people or any(self._store.party_by_wxid(m["wxid"], include_inactive=True) is not None for m in people):
+            return 0
+        her, how = self._choose(row, people, members, own_name, _num((info or {}).get("last_at")))
+        if her is None:
+            return 0                           # (nobody of her side spoke yet: it waits, and is looked at again)
+        call = title_call(title_parts(name, self._drop_words(row, members, own_name)))
+        call = call or her_name(her.get("name"), her["wxid"])
+        out = self.take_over(chat, her["wxid"], her.get("name") or "", actor="system", picked=how, call=call)
+        if not out.get("ok"):
+            return 0
+        self._pick_seen.pop(chat, None)
+        party = self._store.party(int(out["party_id"])) or {}
+        same = [p for p in self._store.parties(include_inactive=True)
+                if p["id"] != party.get("id") and _key(p.get("name")) == _key(party.get("name"))]
+        logger.info("PRM: boss group %s…: the scan chose whom its deal hangs on (%s; %d of her side there): party %d",
+                    chat[:8], how, len(people), party.get("id") or 0)
+        self._auto_owe(self._auto_state(), "", chat, PICKED_NOTICE,
+                       {"chat": chat, "name": name, "size": len(members) + 1, "party": party, "out": out, "how": how,
+                        "hook": str(her.get("name") or ""), "others": len(people) - 1,
+                        "same": [{"id": p["id"], "name": p["name"]} for p in same]}, now)
+        return 1
+
+    def _choose(self, row: dict, people: list, members: list, own_name: str = "",
+                last_at: Optional[float] = None) -> tuple:
+        """Whom of ``people`` (the ones who may be her) the deal hangs on: ``(member, how)``, or ``(None, "")`` (wait).
+        PICK_TITLE: exactly one of them has a name the group's name has in it (``title_has``: a run of two characters or
+        more, after both are cleaned of our brand, the bosses' and our own people's names and TITLE_WORDS; two of them:
+        no match); else PICK_FIRST: the first of them to speak in the group since we were added, as far back as its
+        lines can be read (``_first_speaker``)."""
+        drop = self._drop_words(row, members, own_name)
+        parts = title_parts(row.get("name"), drop)
+        hits = [m for m in people if title_has(parts, m.get("name"), drop)]
+        if len(hits) == 1:
+            return hits[0], PICK_TITLE
+        first = self._first_speaker(row, people, last_at)
+        return (first, PICK_FIRST) if first is not None else (None, "")
+
+    def _first_speaker(self, row: dict, people: list, last_at: Optional[float] = None) -> Optional[dict]:
+        """The first of ``people`` to write a line in the group (the backend's ``group_lines`` since WeChat's line that we
+        were added, else its oldest line: the earliest it can read), or None (none of them yet, a backend that cannot
+        read lines, not readable now).  Read again only when something was said since (``last_at``: the session list's
+        time of the group; unknown: each time)."""
+        read = getattr(self._backend, "group_lines", None)
+        chat = row["chat"]
+        if not callable(read) or (last_at is not None and chat in self._pick_seen and self._pick_seen[chat] == last_at):
+            return None
+        since = _num(row.get("joined_at"))
+        since = since if since is not None else (_num(row.get("made_at")) or 0.0)
+        try:
+            lines = read(chat, since)
+        except Exception:
+            logger.debug("PRM: boss group %s…: its lines could not be read for who spoke first", chat[:8], exc_info=True)
+            lines = None
+        if lines is None:
+            return None
+        self._pick_seen[chat] = last_at
+        by_id = {m["wxid"]: m for m in people}
+        for msg in sorted((m for m in lines if isinstance(m, dict)), key=lambda m: _num(m.get("timestamp")) or 0.0):
+            sender = str(msg.get("sender_id") or "")
+            if sender and not msg.get("is_own") and not msg.get("is_system_join") and sender in by_id:
+                return by_id[sender]
+        return None
+
+    def waiting_why(self, row: Optional[dict]) -> str:
+        """Why a 老板拉的群 waits on the console's card for 「是她」, said truly (「接群 <群名>」's answer, src/prm/
+        group_link.py): its own reason (not sure it is new, a stopped creator, registering failed…), a name of
+        PRM_GROUP_WITH or PRM_GROUP_OURS not known, a registered creator among the ones who may be her, the pick off
+        (PICK_OFF_WHY) or on without PRM_GROUP_HER_SIDE (PICK_SIDE_WHY), or waiting for one of her side to speak
+        (PICK_WAIT_WHY)."""
+        row = row or {}
+        if row.get("why"):
+            return str(row["why"])
+        if self._unknown:
+            return self._unknown_why()
+        if self._ours_unknown:
+            return self.ours_warning()
+        ids, never = self._not_her(row)
+        people = candidates(row.get("members") or [], ids, self._reserved, never)
+        if len(people) < 2:
+            return "群里能当达人的人现在读不准" if not people else ""
+        if any(self._store.party_by_wxid(m["wxid"], include_inactive=True) is not None for m in people):
+            return PICK_REGISTERED_WHY
+        if not self._pick:
+            return PICK_OFF_WHY
+        if not self._her_side:
+            return PICK_SIDE_WHY
+        return PICK_WAIT_WHY
+
     def _look_at_linked(self, own: str, now: float, manual_only: bool = False) -> None:
         """Is she still in each group the bot took over (``manual_only``: each one linked by hand)?  Gone: her deal says
         so (until she is back).  The row's members are the group's now (second check 2026-11-09: a recall is told apart
@@ -1466,19 +1786,51 @@ class BossGroups:
             there = any(m["wxid"] == party["wxid"] for m in members)
             if members and members != row["members"]:
                 self._store.update_boss_group(row["chat"], now, states=(LINKED,), members=members)
+            picked = bool(row.get("picked")) and not row.get("manual") and self.pick_on
+            if not there and picked and members and self._rehook_left({**row, "members": members}, party, now,
+                                                                      was=row["members"]):
+                continue                       # (老板拉的群里机器人自己选人: the deal hangs on another of her side now)
             key = LEFT_NOTICE + row["chat"]
             has = any(n.get("key") == key for n in deal["notices"])
             if not there and not has:
-                self._store.set_notice(deal["id"], key, MANUAL_LEFT_TEXT if row.get("manual") else
+                self._store.set_notice(deal["id"], key, PICK_LEFT_TEXT if picked else MANUAL_LEFT_TEXT
+                                       if row.get("manual") else
                                        "她已经不在老板拉的群里了：那个群里不会再有她的消息可起草，需要的话在微信里看一眼", now)
                 logger.info("PRM: boss group %s…: party %d is not in it any more; her deal says so", row["chat"][:8],
                             party["id"])
             elif there and has:
                 self._store.drop_notices(deal["id"], lambda n: n.get("key") == key, now)
 
+    def _rehook_left(self, row: dict, party: dict, now: float, was=()) -> bool:
+        """The member the deal of a group the scan took over by choosing (``picked``) hangs on left it: the deal hangs on
+        another of her side by the same rules (``_choose``: the group's name, else who of them spoke there first; never
+        a registered or stopped creator) and the admin is told once (REHOOKED_NOTICE).  False when there is none to
+        choose yet (the deal says she left, as before) or it cannot be done now (``rehook``).  ``was``: the members as
+        read before (the name of the member who left)."""
+        ids, never = self._not_her(row)
+        people = [m for m in candidates(row["members"], ids, self._reserved, never)
+                  if self._store.party_by_wxid(m["wxid"], include_inactive=True) is None]
+        if not people:
+            return False
+        her, how = self._choose(row, people, row["members"], "", _num(row.get("last_line_at")))
+        if her is None:
+            return False
+        gone = next((str(m.get("name") or "") for m in was or () if m.get("wxid") == party["wxid"]), "")
+        out = self.rehook(row["chat"], her["wxid"], actor="system", how=REHOOK_LEFT, was=gone)
+        if not out.get("ok"):
+            logger.info("PRM: boss group %s…: the member its deal hangs on left; not moved to another (%s)",
+                        row["chat"][:8], out.get("error") or "no reason given")
+            return False
+        self._pick_seen.pop(row["chat"], None)
+        self._auto_owe(self._auto_state(), "", row["chat"], REHOOKED_NOTICE,
+                       {"chat": row["chat"], "name": row["name"], "size": len(row["members"]) + 1,
+                        "party": self._store.party(int(party["id"])) or party, "out": out, "how": how}, now)
+        return True
+
     # ── taking over ───────────────────────────────────────────────────────
 
-    def take_over(self, chat: str, wxid: str, name: str = "", *, actor: str = "system") -> dict:
+    def take_over(self, chat: str, wxid: str, name: str = "", *, actor: str = "system", picked: str = "",
+                  call: str = "") -> dict:
         """She (``wxid``; ``name``: as this account sees her) is this group's creator: registered unless she is an active
         creator already, the group linked to her deal (``_link``), watched (``watch_group``), the lines kept before
         handed on (``_replay``), the deal's record (``EVENT``), one log line without names; the group 开场白 is asked
@@ -1486,7 +1838,14 @@ class BossGroups:
         console; one with a 三方群 made or unsure, looked at again right before the link under ThreeParty's lock, is not
         taken over; while 「拉三方群」 makes one for her, never a 「先试一下」, the group waits and is looked at again once that
         is done) or console (``pick``).  ``{"ok": True, "party_id", "deal_id"}`` or ``{"ok": False, "error"}`` (the group
-        is pending then, ``why`` says it; ignored for her 三方群; waiting while hers is being made)."""
+        is pending then, ``why`` says it; ignored for her 三方群; waiting while hers is being made).
+        ``picked`` (老板拉的群里机器人自己选人, ``_pick_one``: PICK_TITLE / PICK_FIRST): the scan chose her among more
+        people of her side: she is registered with ``call`` (the 称呼 from the group's name) and without a 开场白 of her
+        private chat (she is only the deal's hook), the row keeps ``picked`` and is unconfirmed (every draft there waits
+        for a person, ``unconfirmed``), and what was said there lately is read once as for a group the scan linked by
+        itself (``catch_up``: context, one draft when her side waits) before the watch starts after it; the group
+        开场白 only when nobody of her side spoke there (PrmService ``_group_opening_why``).  Its answer has
+        ``registered``, ``kept`` and ``caught`` besides."""
         with self._lock:
             row = self._store.boss_group(str(chat or ""))
             if row is None or row["state"] not in (PENDING, WAITING):
@@ -1495,11 +1854,11 @@ class BossGroups:
             # (registered and not linked yet, her new-friend catch-up may be read: it is masked all the same, ``masks``)
             self._taking = self._taking | {wxid}
             try:
-                return self._take_over(row, wxid, name, actor)
+                return self._take_over(row, wxid, name, actor, picked=picked, call=call)
             finally:
                 self._taking = self._taking - {wxid}
 
-    def _take_over(self, row: dict, wxid: str, name: str, actor: str) -> dict:
+    def _take_over(self, row: dict, wxid: str, name: str, actor: str, picked: str = "", call: str = "") -> dict:
         """``take_over`` (under ``_lock``)."""
         now = self._clock()
         party = self._store.party_by_wxid(wxid)
@@ -1510,7 +1869,10 @@ class BossGroups:
             if self._register is None:
                 return self._held(row, "机器人这边没法登记达人", "no registering", now)
             try:
-                party = self._register(wxid, her_name(name, wxid), her_note(row["name"]))
+                if picked:                     # (only the deal's hook: no 开场白 of her private chat by itself)
+                    party = self._register(wxid, call or her_name(name, wxid), her_note(row["name"]), opening=False)
+                else:
+                    party = self._register(wxid, her_name(name, wxid), her_note(row["name"]))
             except PartyError as e:
                 return self._held(row, f"没登记成：{e}", "registering failed", now)
             made = True
@@ -1532,20 +1894,48 @@ class BossGroups:
                 return {"ok": False, "error": HAS_GROUP_WHY}
             kept = self._link(deal, row, now)
             self._store.update_boss_group(row["chat"], now, states=(PENDING, WAITING), state=LINKED,
-                                          party_id=int(party["id"]), deal_id=int(deal["id"]), why="", opening_due=now)
+                                          party_id=int(party["id"]), deal_id=int(deal["id"]), why="", opening_due=now,
+                                          **({"picked": picked, "confirmed_at": None} if picked else {}))
             self._linked = {**self._linked, row["chat"]: int(party["id"])}
         self._store.add_event(deal["id"], party["id"], EVENT,
-                              {"name": row["name"], "chat": row["chat"], "new": made, **({"kept": True} if kept else {})},
+                              {"name": row["name"], "chat": row["chat"], "new": made, **({"kept": True} if kept else {}),
+                               **({"picked": picked} if picked else {})},
                               actor="console" if actor == "console" else "system", now=now)
-        since = self._since(row)
-        self._watch(row["chat"], since)
-        self._replay(row["chat"], since, now)  # (her words before it: a reply job, then no 开场白)
+        caught = None
+        if picked:
+            # (as a group the scan linked by itself: what was said there read once, her side's lines after our last one
+            # one draft that waits; the watch from the second after it, ``_link_offer``.  From when we were added, not
+            # only PRM_CATCHUP_HOURS back: the group waited on the card meanwhile; a line of hers older than that is
+            # recorded and her deal asks a person to look, PrmService._missed, never dropped silently)
+            since = self.catch_up_since(self._store.boss_group(row["chat"]) or row)
+            joined = _num(row.get("joined_at"))
+            joined = joined if joined is not None else _num(row.get("made_at"))
+            since = min(since, joined) if joined is not None else since
+            if self._catch_up is not None:
+                try:
+                    caught = self._catch_up(party, row["chat"], since)
+                except Exception:
+                    logger.exception("PRM: boss group %s…: what was said there before it was taken over could not be "
+                                     "read", row["chat"][:8])
+            caught = dict(caught) if isinstance(caught, dict) else {"read": False}
+            since = caught.pop("since", None)
+            since = float(since) if isinstance(since, (int, float)) else self._wechat_time(now)
+            self.note_line(row["chat"], since - 1)
+            self._watch(row["chat"], since)
+        else:
+            since = self._since(row)
+            self._watch(row["chat"], since)
+            self._replay(row["chat"], since, now)  # (her words before it: a reply job, then no 开场白)
         self._due = {**self._due, row["chat"]: now}
         logger.info("PRM: boss group %s… taken over (%s): party %d %s%s; its 开场白 once its lines so far are read",
-                    row["chat"][:8], "the console" if actor == "console" else "the scan", party["id"],
+                    row["chat"][:8], "the console" if actor == "console" else
+                    f"the scan, which chose her: {picked}" if picked else "the scan", party["id"],
                     "registered" if made else "linked", ", her deal keeps its 三方群" if kept else "")
         self._openings(now)                    # (a backend whose watch caught up at once)
-        return {"ok": True, "party_id": int(party["id"]), "deal_id": int(deal["id"])}
+        out = {"ok": True, "party_id": int(party["id"]), "deal_id": int(deal["id"])}
+        if picked:
+            out.update(registered=made, kept=kept, caught=caught)
+        return out
 
     def _held(self, row: dict, why: str, code: str, now: float) -> dict:
         """Not taken over: the group waits for the console (``pending``, ``why``)."""
@@ -1693,6 +2083,9 @@ class BossGroups:
             return self.link(chat, wxid, actor="console")
         if not self._on:
             return {"ok": False, "error": "没打开「老板拉的群」（PRM_BOSS_GROUPS）"}
+        if self.picked(chat) and self.unconfirmed(chat):
+            # (老板拉的群里机器人自己选人: the card's 「改挂」 on another member of a group the scan took over so)
+            return self.rehook(chat, wxid, actor="console")
         with self._lock:
             row = self._store.boss_group(str(chat or ""))
             if row is None or row["state"] != PENDING:
@@ -1856,6 +2249,8 @@ class BossGroups:
         (``AUTO_STATE`` ``no``): the scan never links it by itself, asks or tells about it again; an operator's own
         「接群」 still links it.  True when there was a question."""
         target = str(chat or "") if chat is not None else str((self._offer or {}).get("chat") or "")
+        if (self.offered(target) or {}).get("rehook"):
+            return self.withdraw(target)       # (「改挂到谁」 dropped: the group stays as it is, nothing is refused)
         had = self.withdraw(chat)
         if had and target:
             self.refuse(target)                # (review 2026-11-11 #6: whatever the switch says, a person's 「不接」 lasts)
@@ -1903,7 +2298,85 @@ class BossGroups:
         her = next((m for m in offer["members"] if m["wxid"] == wxid), None)
         if her is None:
             return {"ok": False, "error": "只能选这个群里的人（不能选我们自己、老板，也不能选管理员和能用 cc 的人）"}
+        if offer.get("rehook"):                # (老板拉的群里机器人自己选人: 「接群 <群名>」 asked 「改挂到谁」)
+            out = self.rehook(chat, wxid, actor=actor)
+            if out.get("ok"):
+                self.withdraw(chat)
+            return out
         return self._link_offer(offer, her, actor)
+
+    def rehook_offer(self, chat: str, name: str = "") -> Optional[dict]:
+        """「接群 <群名>」 of a 老板拉的群 the scan took over by choosing whom its deal hangs on (confirmed or not): the open
+        question 「改挂到谁」 (``offer`` with ``rehook``: the others of her side, numbered; 「是 N」 is ``rehook``), or None
+        (no such group, or its members cannot be read now)."""
+        chat = str(chat or "")
+        if not (self.picked(chat) and self.is_linked(chat)):
+            return None
+        found = self.candidates_of(chat)
+        row = self._store.boss_group(chat) or {}
+        party = self._store.party(int(row.get("party_id") or 0)) if row.get("party_id") else None
+        if found is None or party is None:
+            return None
+        others = [m for m in found["members"] if m["wxid"] != party["wxid"]]
+        offer = self.offer(chat, name or row.get("name") or "", len(found["all"]) + 1, {**found, "members": others})
+        self._offer = {**offer, "rehook": True}
+        return dict(self._offer)
+
+    def rehook(self, chat, wxid, *, actor: str = "console", how: str = REHOOK_CONSOLE, was: str = "") -> dict:
+        """老板拉的群里机器人自己选人: the deal of a group the scan took over by choosing whom it hangs on hangs on another
+        member of her side from now on (the card's 「改挂」, 「是 N」 after 「接群 <群名>」; or the scan itself when that member
+        left the group, ``how`` REHOOK_LEFT): her party's wxid becomes that member's (``PrmStore.set_party_wxid``: the
+        deal, its 称呼, record and drafts stay; that member's private chat counts from now on, the one before's no
+        more).  Only a member who may be her (``candidates``) and who is no party at all (active or stopped); not while
+        the hook's private chat has a draft on its way (``hook_busy``).  A person's choice confirms the group
+        (``confirm``).  ``{"ok": True, "party_id", "deal_id", "name": the deal's 称呼, "was": the member it hung on,
+        "now": the one it hangs on (names as this account sees them; ``was`` given: the one who left), "chat",
+        "group"}`` or ``{"ok": False, "error"}``."""
+        chat, wxid = str(chat or ""), str(wxid or "").strip()
+        with self._lock:
+            row = self._store.boss_group(chat)
+            if (row is None or row["state"] != LINKED or row.get("manual") or not row.get("picked")
+                    or chat not in self._linked):
+                return {"ok": False, "error": "这个群不是机器人自己选人接手的老板拉的群（或者已经不接了）"}
+            party = self._store.party(int(row.get("party_id") or 0)) if row.get("party_id") else None
+            if party is None:
+                return {"ok": False, "error": "这个群的合作单找不到了"}
+            ids, never = self._not_her(row)
+            her = next((m for m in candidates(row["members"], ids, self._reserved, never) if m["wxid"] == wxid), None)
+            if wxid == party["wxid"]:
+                return {"ok": False, "error": "合作单现在就挂在这个人身上"}
+            if her is None:
+                return {"ok": False, "error": "只能选这个群里她那边的人（不能选我们自己、老板，也不能选管理员和能用 cc 的人）"}
+            if self._store.party_by_wxid(wxid, include_inactive=True) is not None:
+                return {"ok": False, "error": "这个人已经在达人名单里（登记过或停用过）：不能改挂到 TA 身上，"
+                                              "要的话先「不接群」，再「接群」选 TA"}
+            busy = self._hook_busy(party) if self._hook_busy is not None else ""
+            if busy:
+                return {"ok": False, "error": busy}
+            was = was or next((str(m.get("name") or "") for m in row["members"] if m.get("wxid") == party["wxid"]), "")
+            now = self._clock()
+            if not self._store.set_party_wxid(int(party["id"]), wxid, now):
+                return {"ok": False, "error": "没改成（这个人可能刚被登记了）"}
+            self._knows.pop(party["wxid"], None)
+            self._knows.pop(wxid, None)
+            deal = self._store.deal(int(row.get("deal_id") or 0))
+            if deal is not None:
+                self._store.drop_notices(deal["id"], lambda n: n.get("key") == LEFT_NOTICE + chat, now)
+                self._store.add_event(deal["id"], party["id"], EVENT,
+                                      {"name": row["name"], "chat": chat, "picked": str(row["picked"]), "rehooked": how},
+                                      actor=actor if actor in PERSON_ACTORS else "system", now=now)
+        if self._parties_changed is not None:
+            try:
+                self._parties_changed()        # (the registered wxids: whose private chat is read now)
+            except Exception:
+                logger.exception("PRM: boss group %s…: the change of whom its deal hangs on was not told", chat[:8])
+        logger.info("PRM: boss group %s…: party %d's deal hangs on another member of her side now (%s, %s)", chat[:8],
+                    party["id"], how, actor)
+        out = {"ok": True, "party_id": int(party["id"]), "deal_id": int(row.get("deal_id") or 0), "chat": chat,
+               "group": row["name"], "name": str(party["name"]), "was": was, "now": str(her.get("name") or "")}
+        if actor in PERSON_ACTORS:
+            self.confirm(chat, actor=actor, how="rehook")
+        return out
 
     def _link_offer(self, offer: dict, her: dict, actor: str, auto: bool = False) -> dict:
         """``link``, once the group (``offer``: ``{"chat", "name", "members", "all", "boss"}``) and who she is are
