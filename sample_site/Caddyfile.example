@@ -1,0 +1,9 @@
+# Replace the domain. Caddy gets and renews the HTTPS certificate itself.
+# Do not add a "log" directive: access logs would hold the creators' link tokens.
+xuan.example.com {
+	request_body {
+		max_size 3MB
+	}
+	encode gzip
+	reverse_proxy site:8080
+}

@@ -1,0 +1,32 @@
+# Example: the site behind Caddy (automatic HTTPS). Copy to docker-compose.yml,
+# put your domain into Caddyfile and your settings into site.env (chmod 600),
+# then: docker compose up -d --build
+services:
+  site:
+    build: .
+    restart: unless-stopped
+    env_file: site.env          # SAMPLE_SITE_ADMIN_TOKEN=..., SAMPLE_SITE_PUBLIC_URL=https://...
+    environment:
+      SAMPLE_SITE_TRUST_PROXY: "1"
+    volumes:
+      - site-data:/data
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - site
+
+volumes:
+  site-data:
+  caddy-data:
+  caddy-config:
