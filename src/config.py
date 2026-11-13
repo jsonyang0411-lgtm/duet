@@ -403,6 +403,13 @@ class BotConfig:
     # console says it cannot be read).  A registered creator's new lines become a 百应 draft in 待审批 that an operator
     # copies and sends in 百应 by hand; the bot never sends it.
     prm_buyin_sync_min: int = 0
+    # 选款网站 (sample_site/, CODEBASE_REFERENCE 功能「选款网站」, 2026-11-13): every PRM_SAMPLE_SITE_MIN minutes (2-1440,
+    # 0 = off, the default) the Mac takes the creators' new submissions from the site and each becomes a sample
+    # order's draft in 待审批 (no photo check: she picked our own codes); 「发选款链接」 / 「选款链接 <达人>」 needs it on too.
+    # PRM_SAMPLE_SITE_AUTO "on" (off by default): such an order whose preview is ready is made (and audited) without a
+    # person's 批准并执行.
+    prm_sample_site_min: int = 0
+    prm_sample_site_auto: str = "off"
     # 加百应达人微信 (src/prm/friend_adds.py, CODEBASE_REFERENCE 功能 R): "on" lets an operator turn the contact a creator
     # left in 百应 into ONE WeChat friend request (the console's 「添加该达人微信」, or the admin's 加达人 N) through the
     # friend manager's add_friend (Windows: the WeChat window), at most prm_friend_add_daily_max a day and
@@ -688,6 +695,11 @@ def _validate_config(kwargs: dict) -> None:
     buyin_min = int(kwargs.get("prm_buyin_sync_min", 0))
     if not (buyin_min == 0 or 5 <= buyin_min <= 1440):
         errors.append(f"PRM_BUYIN_SYNC_MIN must be 0 (off) or between 5 and 1440, got {kwargs.get('prm_buyin_sync_min')}")
+    site_min = int(kwargs.get("prm_sample_site_min", 0))
+    if not (site_min == 0 or 2 <= site_min <= 1440):
+        errors.append(f"PRM_SAMPLE_SITE_MIN must be 0 (off) or between 2 and 1440, got {kwargs.get('prm_sample_site_min')}")
+    if kwargs.get("prm_sample_site_auto", "off") not in ("off", "on"):
+        errors.append(f"PRM_SAMPLE_SITE_AUTO must be off or on, got {kwargs.get('prm_sample_site_auto')}")
     friend_add = kwargs.get("prm_friend_add", "off")
     if friend_add not in ("off", "on"):
         errors.append(f"PRM_FRIEND_ADD must be off or on, got {friend_add}")
@@ -888,6 +900,8 @@ def load_config() -> BotConfig:
         "prm_handcards": _parse_switch(os.getenv("PRM_HANDCARDS", "off")),
         "prm_draft_context": _parse_switch(os.getenv("PRM_DRAFT_CONTEXT", "off")),
         "prm_buyin_sync_min": int(os.getenv("PRM_BUYIN_SYNC_MIN", "0")),
+        "prm_sample_site_min": int(os.getenv("PRM_SAMPLE_SITE_MIN", "0")),
+        "prm_sample_site_auto": _parse_switch(os.getenv("PRM_SAMPLE_SITE_AUTO", "off")),
         "prm_friend_add": _parse_switch(os.getenv("PRM_FRIEND_ADD", "off")),
         "prm_friend_add_daily_max": int(os.getenv("PRM_FRIEND_ADD_DAILY_MAX", "10")),
         "prm_friend_add_gap_sec": int(os.getenv("PRM_FRIEND_ADD_GAP_SEC", "120")),

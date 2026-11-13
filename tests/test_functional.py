@@ -1092,6 +1092,64 @@ class TestPrmPages:
         block = page.locator(".prm-huopan")
         assert block.locator("button:has-text('补发货盘')").is_disabled() and "先恢复副驾驶" in block.inner_text()
 
+    def test_deals_page_sends_a_pick_link_and_the_review_page_tags_it_and_her_site_order(self, page, prm):
+        """选款网站 (PRM_SAMPLE_SITE_MIN, 2026-11-13): with the switch off an opened deal shows no 「发选款链接」; on, the
+        block is there and a click (her waiting draft dropped first) asks the Mac for her link, whose sentence waits in
+        待审批 tagged 选款链接; the sample order she picked on the site waits tagged 网站选款, 「批准并执行」 on (no photo
+        check stands in its way)."""
+        import json as _json
+        from src.prm.service import SETTLE_SEC
+        from test_prm_sample_site import ACCOUNT, order_answer, pull_answer, submission
+
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        assert page.locator(".prm-site-link").count() == 0                    # off by default: nothing is shown
+        prm.service.sample_site._sec = 300                                    # (PRM_SAMPLE_SITE_MIN=5)
+        [waiting] = prm.service.store.packets(("pending",))
+        assert prm.service.decide(waiting["id"], "drop")["ok"]
+        page.reload()
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-site-link")
+        assert "不用对图" in block.inner_text() and "不会自动发" in block.inner_text()
+        block.locator("button:has-text('发选款链接')").click()
+        page.wait_for_timeout(1200)
+        assert "已请 Mac 建选款链接" in page.inner_text("body")
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["site_link"]["by"] == "console" and job["text"] == ""
+        line = ("老师，我们把在售的款式放在这个页面了，您看看喜欢哪几款，直接在上面选就可以：\n"
+                "https://xuan.example.test/s/" + "A" * 32)
+        draft = {"intent": "发选款链接（最多选 3 顶，14 天内有效）", "slots": {}, "stage_proposal": "",
+                 "message_kind": "other", "reply_draft": line, "attachments_to_send": [], "needs_attention": False,
+                 "reason": ""}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        # she picked two hats on the site: a round, then her order's draft from the Mac
+        assert prm.service.store.add_creator_link(1, ACCOUNT, source="console")
+        prm.clock.now += 120
+        assert prm.service.sample_site.sweep() is not None
+        job = prm.relay.next_job(0, ("prm",))
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(pull_answer(submission()), ensure_ascii=False)})
+        prm.relay.tick()
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["op"] == "site_order"
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(order_answer(), ensure_ascii=False)})
+        prm.relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="直接在上面选就可以")
+        assert card.locator(".tag", has_text="选款链接").count() == 1
+        assert "这一条：发选款链接" in card.inner_text()
+        order = page.locator(".prm-draft", has_text="您选的款我们收到啦")
+        assert order.locator(".tag", has_text="网站选款").count() == 1
+        assert "这一条：选款网站：她自己选了 2 顶" in order.inner_text()
+        assert order.locator("button:has-text('批准并执行')").is_enabled()
+        assert "Mac 没有对图" not in order.inner_text()
+
     def test_deals_page_asks_for_handcards_and_the_review_page_shows_the_cards(self, page, prm, tmp_path):
         """直播手卡 (PRM_HANDCARDS, 2026-11-09): an opened deal has 「直播手卡」 with her latest sample order's product ticked;
         小美's draft waits, so a click says why not; once it is dropped a click with one more typed product id asks the

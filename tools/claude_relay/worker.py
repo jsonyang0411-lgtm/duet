@@ -202,6 +202,9 @@ DEFAULTS = {
     "platforms": {},           # the platform CLIs' folders and limits (platform actions; empty = none)
     # the catalogue (--sync-products) by itself at night when idle, at most every that many hours; 0 = off (by hand)
     "products_sync_hours": 0,
+    # 选款网站 (tools/claude_relay/sample_site.py; the bot's PRM_SAMPLE_SITE_MIN): {"url", "token_file", "owner",
+    # "max_items", "expires_days", "audit", "link_text", "order_reply", "catalog": {…}}; without "url": no site jobs
+    "sample_site": {},
 }
 
 SYSTEM_NOTE = (
@@ -297,6 +300,25 @@ def _load_draft_context():
 
 
 draft_context = _load_draft_context()
+
+# 选款网站 (sample_site/, the bot's PRM_SAMPLE_SITE_MIN, 2026-11-13): links, the creators' submissions and their sample
+# orders (tools/claude_relay/sample_site.py, loaded by path; settings: config.json's ``sample_site``).
+SAMPLE_SITE_FILE = Path(__file__).resolve().parent / "sample_site.py"
+
+
+def _load_sample_site():
+    """tools/claude_relay/sample_site.py next to this file, or None (then a site job says so and nothing is made)."""
+    try:
+        spec = importlib.util.spec_from_file_location("webot_sample_site", str(SAMPLE_SITE_FILE))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception as e:                               # a copy of this file without its neighbour
+        logging.getLogger("claude_relay.worker").warning("sample site off: %s not loaded (%s)", SAMPLE_SITE_FILE, e)
+        return None
+
+
+sample_site = _load_sample_site()
 
 PRM_TOOLS = "Read,Edit,Write,Glob,Grep"
 PRM_DENIED_TOOLS = "Bash,WebFetch,WebSearch,Task,NotebookEdit"
@@ -2712,6 +2734,8 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         return do_sample_status_job(settings, job, client, meta)
     if meta.get("op") == "buyin_inbox":          # 百应私信: no creator, no model, no workspace needed
         return do_buyin_inbox_job(settings, job, client, meta)
+    if meta.get("op") == "site_pull":            # 选款网站: the new submissions; no creator, no model, no workspace
+        return do_site_pull_job(settings, job, client, meta)
     workspace, problem = prm_workspace_dir(settings)
     if workspace is None:
         log.warning("#%s prm job not run: %s", job["id"], problem)
@@ -2724,6 +2748,10 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         return purge_case_file(workspace, party_id)
     if meta.get("op") in ("platform_execute", "platform_preview"):
         return do_platform_job(settings, job, client, workspace, meta)
+    if isinstance(meta.get("site_link"), dict):      # 「发选款链接」: a fixed sentence with her link, no model
+        return do_site_link_job(settings, job, meta, party_id)
+    if isinstance(meta.get("site_order"), dict):     # her choice on the site as a sample order's draft, no model
+        return do_site_order_job(settings, job, client, workspace, meta, party_id)
     buyin = meta.get("channel") == "buyin"
     cards_cfg, cards_why = handcards_settings() if not buyin else (None, "百应私信不能附图")
     if isinstance(meta.get("handcards"), dict) and cards_cfg is None:
@@ -3046,9 +3074,10 @@ def invite_context(settings: dict, creator=None) -> dict:
 
 
 def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayClient, job_id: int,
-                     party_id: int = 0, creator=None) -> dict:
+                     party_id: int = 0, creator=None, audit: bool = False) -> dict:
     """The Mac's verdict on a draft's platform action (the bot gets it as ``platform``).  ``creator``: the job's
-    ``meta.creator`` (``invite_context``)."""
+    ``meta.creator`` (``invite_context``).  ``audit`` (选款网站的单 only): the sample order's approval also audits it
+    (``platforms.PLANS``: ``("create", "audit")``)."""
     if platforms is None:
         return {"version": 1, "action": None, "requested": raw_action if isinstance(raw_action, dict) else None,
                 "verdict": "unavailable", "problems": ["这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）"],
@@ -3060,6 +3089,7 @@ def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayC
         with _cli_lock(beat):
             block = platforms.preview(raw_action, cfg, catalog=platforms.load_catalog(workspace), heartbeat=beat,
                                       context={"party_id": party_id, "job_id": job_id,
+                                               **({"audit": True} if audit else {}),
                                                **invite_context(settings, creator)})
     except (TimeoutError, platforms.Cancelled) as e:
         block = platforms.failed_preview(raw_action, cfg, str(e))
@@ -3244,13 +3274,16 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
                 "duration_s": 0}
     started = time.monotonic()
     if meta.get("op") == "platform_preview":
+        by_site = isinstance(meta.get("site_order"), dict)      # 选款网站的单: she picked our own codes herself
         block = platform_preview(settings, workspace, meta.get("action"), client, int(job["id"]),
-                                 int(meta.get("party_id") or 0), creator=meta.get("creator"))
+                                 int(meta.get("party_id") or 0), creator=meta.get("creator"),
+                                 audit=by_site and site_audit(settings))
         action = meta.get("action") if isinstance(meta.get("action"), dict) else {}
         # PRM_DRAFT_CONTEXT: a sample order's new preview is checked by photo again (her remembered pictures), with a
         # new sheet for the operators (``operator_files`` next to the block: the bot keeps it on the draft)
+        # (a 选款网站 order is never checked by photo: there is no picture of hers to match, the codes are ours)
         context = (prm_context(settings, job, meta, workspace, [], client, pictures=False)
-                   if action.get("action") == "jst.sample_order" else None)
+                   if action.get("action") == "jst.sample_order" and not by_site else None)
         files, marks = [], {}
         if context is not None:
             block, files, marks = sample_order_gate(settings, workspace, block, context, client, int(job["id"]))
@@ -3366,6 +3399,104 @@ def do_buyin_inbox_job(settings: dict, job: dict, client: RelayClient, meta: dic
              sum(1 for c in conversations if c.get("invited")),
              f"; stopped ({stopped.get('verdict')}, exit {stopped.get('exit_code')})" if stopped else "")
     return {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": round(time.monotonic() - started, 1)}
+
+
+# ── 选款网站 (tools/claude_relay/sample_site.py; the bot's PRM_SAMPLE_SITE_MIN) ────────────────────────────
+
+NO_SAMPLE_SITE = "这台 Mac 的 worker 没有选款网站的模块（tools/claude_relay/sample_site.py）"
+
+
+def site_audit(settings: dict) -> bool:
+    """Does this Mac audit a 选款网站 order right after making it (``sample_site.audit``, default true)?"""
+    if sample_site is None:
+        return False
+    try:
+        return bool(sample_site.settings_of(settings)["audit"])
+    except sample_site.SiteError:
+        return False
+
+
+def do_site_pull_job(settings: dict, job: dict, client: RelayClient, meta: dict) -> dict:
+    """``meta.op == "site_pull"`` (the bot's PRM_SAMPLE_SITE_MIN): tell the site which submissions the bot has stored
+    (``meta.acks``: the site then keeps only masked remnants of their receivers), then take every submission not
+    acked yet (the new ones are locked by this: she cannot change them any more).  No model, no platform CLI.  The
+    answer is ``sample_site.pull``'s JSON, or its ``stopped`` (not configured, key refused, site not reachable): the
+    bot asks again next round, nothing is lost (the site gives un-acked ones every time).  The receivers are in the
+    answer: it goes to the bot from memory, never through the outbox (``MEMORY_ONLY_OPS``), and the log has counts."""
+    started = time.monotonic()
+    if sample_site is None:
+        return {"ok": False, "text": "", "error": NO_SAMPLE_SITE, "duration_s": 0}
+    try:
+        site, conf = sample_site.client_of(settings)
+        result = sample_site.pull(site, conf, meta.get("acks") if isinstance(meta.get("acks"), list) else [])
+    except sample_site.SiteError as e:
+        result = sample_site.stopped_result(e)
+    stopped = result.get("stopped") or {}
+    log.info("#%s 选款网站: %d acked, %d submission(s) waiting%s", job["id"], len(result.get("acked") or []),
+             len(result.get("submissions") or []), f"; stopped ({stopped.get('verdict')})" if stopped else "")
+    return {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": round(time.monotonic() - started, 1)}
+
+
+def do_site_link_job(settings: dict, job: dict, meta: dict, party_id: int) -> dict:
+    """「发选款链接」 (the bot's ``meta.site_link``): one link of the site for this creator and the draft that sends
+    it (``sample_site.link_draft``: a fixed sentence, no model).  The bot keeps the draft for a person."""
+    started = time.monotonic()
+    if sample_site is None:
+        return {"ok": False, "text": "", "error": NO_SAMPLE_SITE, "duration_s": 0}
+    try:
+        site, conf = sample_site.client_of(settings)
+        draft = sample_site.link_draft(site, conf, meta["site_link"], party_id)
+    except sample_site.SiteError as e:
+        log.warning("#%s 选款链接 not made (%s)", job["id"], e.verdict)
+        return {"ok": False, "text": "", "error": f"选款链接没建成：{e}", "duration_s": round(time.monotonic() - started, 1)}
+    log.info("#%s 选款链接 made for party %s (link %s)", job["id"], party_id, (draft.get("site_link") or {}).get("id"))
+    return {"ok": True, "text": json.dumps(draft, ensure_ascii=False), "duration_s": round(time.monotonic() - started, 1)}
+
+
+def do_site_order_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict,
+                      party_id: int) -> dict:
+    """A creator's choice on the site as a sample order's draft (the bot's ``meta.site_order``: her codes, the
+    receiver she typed with the phone as 〈手机N〉, her 抖音号), without the model: the codes become the shop's product
+    and SKU ids by this Mac's catalog-map.json (``sample_site.order_action``), the action is previewed like any other
+    (read-only; its approval also audits the order when ``sample_site.audit``), and a 选款单 (her hats' pictures and
+    names) goes back on the operator-only channel.  NOT checked by photo (``sample_order_gate``): she picked our own
+    codes herself, there is no screenshot to match.  A choice that cannot become an order comes back as a draft whose
+    preview says why (never executable), for a person."""
+    started = time.monotonic()
+    if sample_site is None or platforms is None:
+        return {"ok": False, "text": "", "error": NO_SAMPLE_SITE if sample_site is None else
+                "这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）", "duration_s": 0}
+    order = meta["site_order"]
+    try:
+        conf = sample_site.settings_of(settings)
+    except sample_site.SiteError as e:
+        return {"ok": False, "text": "", "error": str(e), "duration_s": 0}
+    try:
+        action = sample_site.order_action(order, sample_site.load_map(HOME_DIR), conf)
+        block = platform_preview(settings, workspace, action, client, int(job["id"]), party_id,
+                                 creator=meta.get("creator"), audit=conf["audit"])
+    except sample_site.SiteError as e:
+        block = sample_site.failed_block(None, str(e))
+    files = []
+    try:
+        site, _ = sample_site.client_of(settings)
+        name = f"{sample_site.SHEET_PREFIX}{int(job['id'])}.jpg"
+        sheet = sample_site.pick_sheet(order.get("items") or [], site.picture,
+                                       sample_site.state_dir(HOME_DIR) / "sheets" / name)
+        if sheet is not None:
+            try:
+                if client.operator_files_ok():
+                    answer = client.upload_operator(int(job["id"]), sheet, name)
+                    files.append({"name": name, "why": sample_site.SHEET_WHY,
+                                  "sha256": str((answer or {}).get("sha256") or "")})
+            finally:
+                sheet.unlink(missing_ok=True)
+    except Exception as e:                               # the sheet is a help, never a reason to lose the order
+        log.warning("#%s 选款单 not sent back: %s", job["id"], _short(e, 120))
+    draft = sample_site.order_draft(conf, order, block, files)
+    log.info("#%s 选款网站 order of party %s: %d hat(s), preview %s, %d sheet(s)", job["id"], party_id,
+             len(order.get("items") or []), block.get("verdict"), len(files))
+    return {"ok": True, "text": json.dumps(draft, ensure_ascii=False), "duration_s": round(time.monotonic() - started, 1)}
 
 
 def platform_ledger() -> Path:
@@ -3868,7 +3999,7 @@ def run_permission_hook() -> int:
 # cards' WeChat ids and phones in full, so it is sent from memory only (``deliver_from_memory``), never written to a
 # file on this Mac.  When the worker stops before the bot has it, it is lost, and that is all right: the bot's cursor
 # did not move (it moves only with an answer it took in), so its next round reads the same messages again.
-MEMORY_ONLY_OPS = ("buyin_inbox",)
+MEMORY_ONLY_OPS = ("buyin_inbox", "site_pull")     # (site_pull: the creators' receivers are in it)
 
 
 def memory_only(job: dict) -> bool:

@@ -64,7 +64,10 @@ MAX_OUTFILE_BYTES = 100 * 1024 * 1024   # one file a prm job's worker sends back
 MAX_OUTFILES = 9                        # files per prm job
 MAX_OPERATOR_FILES = 4                  # files per prm job for the operators only (not counted with MAX_OUTFILES)
 OPERATOR_PREFIX = "对图单-"             # every such file's name starts so (src/prm/draft_context.py SHEET_PREFIX)
-OPERATOR_OPS = ("", "platform_preview")  # the prm jobs that may send one: a draft's, and a new preview's of its action
+# The prm jobs that may send one: a draft's, a new preview's of its action, and a 选款网站 order's (``site_order``,
+# src/prm/sample_site.py: its 选款单, named ``SITE_SHEET_PREFIX``…, the only other name such a file may keep)
+OPERATOR_OPS = ("", "platform_preview", "site_order")
+SITE_SHEET_PREFIX = "选款单-"
 
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _UNSAFE_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -426,7 +429,8 @@ class ClaudeRelay:
         sheet, src/prm/draft_context.py): stored next to the job's outfiles (``outfiles/job-<id>/``), recorded apart
         (``relay_operator_files``: never one of the draft's attachments, not counted with MAX_OUTFILES), at most
         MAX_OPERATOR_FILES a job, only from a draft's job or a new preview's (``OPERATOR_OPS``: never an execution's, a
-        sample-status read's, a clean-up's), its name always starting with ``OPERATOR_PREFIX``.  ``{"id", "size",
+        sample-status read's, a clean-up's), its name always starting with ``OPERATOR_PREFIX`` (a 选款网站 order's sheet:
+        ``SITE_SHEET_PREFIX``).  ``{"id", "size",
         "sha256"}``, or None as ``outfile``."""
         self._seen()
         job = self._store.get(job_id)
@@ -437,7 +441,7 @@ class ClaudeRelay:
         if not 0 < length <= MAX_OUTFILE_BYTES:
             return None
         name = _UNSAFE_NAME.sub("_", str(name)).strip(" .")[:120] or "file"
-        if not name.startswith(OPERATOR_PREFIX):
+        if not name.startswith((OPERATOR_PREFIX, SITE_SHEET_PREFIX)):
             name = (OPERATOR_PREFIX + name)[:120]
         folder = self._files_dir / "outfiles" / f"job-{job_id}"
         folder.mkdir(parents=True, exist_ok=True)

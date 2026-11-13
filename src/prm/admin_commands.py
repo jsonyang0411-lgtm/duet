@@ -10,6 +10,8 @@ answered in one short line, 「<她>：<what happened>」 or the refusal the act
   「做手卡」 when nothing is ticked): one draft job; its draft always waits for a person in 「待审批」 (``_ask_handcards``:
   no gate, 下班时段 or 自动模式 sends cards);
 - 「补发货盘 <达人>」: ``huopan``, one draft job; its draft always waits for a person;
+- 「选款链接 <达人>」 (2026-11-13): ``site_link``, one job that makes her link of the 选款网站 (PRM_SAMPLE_SITE_MIN;
+  src/prm/sample_site.py) and a fixed sentence with it; its draft always waits for a person;
 - 「写开场白 <达人>」: ``opening``, one draft job; ordered from WeChat it always waits for a person too (decision
   2026-11-11: ``meta.opening.held``, never by PRM_OPENING_AUTO_MIN, the 下班时段 or 自动模式; told in WeChat like any
   waiting draft while PRM_WECHAT_REVIEW is on); a click in the console goes as before;
@@ -108,8 +110,9 @@ ECHO_CHARS = 30                      # what the admin typed, as an answer repeat
 # The words and the deal action each one is (``_do``).  「恢复副驾驶」 is the console's button; 「副驾驶」 the short form.
 HANDCARDS, HUOPAN, OPENING, SIGN, NOTE, TAKEOVER, BACK, STATUS = (
     "handcards", "huopan", "opening", "sign", "note", "takeover", "copilot", "status")
+SITE_LINK = "site_link"              # 「选款链接」: the deal action of src/prm/sample_site.py (its LINK)
 VERBS = {"做手卡": HANDCARDS, "补发货盘": HUOPAN, "写开场白": OPENING, "签收": SIGN, "备注": NOTE, "接管": TAKEOVER,
-         "副驾驶": BACK, "恢复副驾驶": BACK, "合作单": STATUS}
+         "副驾驶": BACK, "恢复副驾驶": BACK, "合作单": STATUS, "选款链接": SITE_LINK}
 HELP_WORDS = ("指令",)
 CLEAR_WORDS = ("清空",)
 UNDO_WORDS = ("撤销",)
@@ -138,6 +141,7 @@ HELP_TEXT = (
     "合作单指令（只在管理员私聊里打字发；名字写她在名单里的名字，写全了直接做，只写一部分时先列出来让你回「选 编号」）：\n"
     "做手卡 名字 — 按她最近一张寄样单的款做手卡，做好进「待审批」等你看\n"
     "补发货盘 名字 — 写一份补发货盘的草稿，进「待审批」等你看\n"
+    "选款链接 名字 — 给她建一个选款网站的链接，带链接的那句话进「待审批」等你看（要先打开选款网站）\n"
     "写开场白 名字 — 写一份开场白，进「待审批」等你看\n"
     "签收 名字 — 合作单标「已签收」（和控制台「更新物流 → 已签收」一样）\n"
     "备注 名字 文字 — 换掉她的起草备注（「备注 名字 清空」清掉，「备注 名字 撤销」放回刚才换掉的，「备注 名字」看现在的）\n"
@@ -148,8 +152,8 @@ HELP_TEXT = (
 )
 # One line for the admin's 「帮助」 (src/admin.py ``help_text``: among its commands) while the switch is on, and the
 # relay's help (src/bot.py; CLAUDE_RELAY_ONLY), whose lines are written without the indent (merge 2026-11-11)
-HELP_LINE = "\n  做手卡 / 补发货盘 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 + 名字   合作单指令（发「指令」看用法）"
-RELAY_LINE = "\n做手卡 / 补发货盘 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 名字（合作单指令：发「指令」看用法）"
+HELP_LINE = "\n  做手卡 / 补发货盘 / 选款链接 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 + 名字   合作单指令（发「指令」看用法）"
+RELAY_LINE = "\n做手卡 / 补发货盘 / 选款链接 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 名字（合作单指令：发「指令」看用法）"
 VOICE_TEXT = "合作单指令要打字发（语音不算，免得听错）：比如「{example}」"
 QUOTE_TEXT = "引用的消息不算合作单指令：不引用，直接打字发「{example}」"
 OTHER_TEXT = "只认打字发的合作单指令：比如「{example}」"
@@ -530,7 +534,7 @@ class DealCommands:
         if typed.verb == NOTE and typed.text is None:
             return "看备注"
         return {HANDCARDS: "做手卡", HUOPAN: "补发货盘", OPENING: "写开场白", SIGN: "标签收", NOTE: "改备注",
-                TAKEOVER: "人工接管", BACK: "恢复副驾驶", STATUS: "看合作单"}.get(typed.verb, "")
+                TAKEOVER: "人工接管", BACK: "恢复副驾驶", STATUS: "看合作单", SITE_LINK: "发选款链接"}.get(typed.verb, "")
 
     def _choose(self, number: int) -> str:
         """「选 N」: the open list's N-th deal, the command run once."""
@@ -601,7 +605,8 @@ class DealCommands:
         of what came of it."""
         who = self._shown(party, deal)
         handler = {HANDCARDS: self._handcards, HUOPAN: self._huopan, OPENING: self._opening, SIGN: self._sign,
-                   NOTE: self._note, TAKEOVER: self._takeover, BACK: self._back, STATUS: self._status}[typed.verb]
+                   NOTE: self._note, TAKEOVER: self._takeover, BACK: self._back, STATUS: self._status,
+                   SITE_LINK: self._site_link}[typed.verb]
         answer = handler(typed, party, deal)
         if typed.verb == STATUS:
             logger.info("PRM: 合作单指令 status: deal %d shown in WeChat", deal["id"])
@@ -638,6 +643,14 @@ class DealCommands:
         if not out.get("ok"):
             return self._refused(party, deal, out, "派补发货盘")
         return "已派补发货盘的任务，写好会进「待审批」，要你看过才发"
+
+    def _site_link(self, typed: Typed, party: dict, deal: dict) -> str:
+        """「选款链接」: her link of the 选款网站 in a fixed sentence (``SampleSite.ask_link``); its draft always waits for
+        a person."""
+        out = self._action(SITE_LINK, {"deal_id": deal["id"]})
+        if not out.get("ok"):
+            return self._refused(party, deal, out, "派发选款链接")
+        return "已派发选款链接的任务，带链接的那句话会进「待审批」，要你看过才发"
 
     def _opening(self, typed: Typed, party: dict, deal: dict) -> str:
         """「写开场白」: the console's, but its draft never goes by itself (``meta.opening.held``: no PRM_OPENING_AUTO_MIN,

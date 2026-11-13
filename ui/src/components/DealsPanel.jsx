@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check, HandWaving,
-  UsersThree, Copy, PencilSimple, Package, IdentificationCard,
+  UsersThree, Copy, PencilSimple, Package, IdentificationCard, LinkSimple,
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
@@ -353,6 +353,24 @@ function DealDetail({ p, d, onDone }) {
           {(!p.active || deal.mode !== 'copilot') && <span className="dim" style={{ marginLeft: 8 }}>{!p.active ? '已停用的达人不发' : '先恢复副驾驶'}</span>}
         </div>
       </div>
+
+      {/* 发选款链接 (the deal action site_link, 2026-11-13): her link of the 选款网站; only while PRM_SAMPLE_SITE_MIN is on */}
+      {d.sample_site?.min > 0 && (
+        <div className="stack prm-site-link" style={{ gap: 6 }}>
+          <b>发选款链接</b>
+          <div className="f-hint">
+            让她自己在网页上选样品、填收货信息：点「发选款链接」，Mac 给她建一个专属链接，带链接的那句话在「待审批」里等你看过再发，不会自动发。
+            她提交以后，寄样单草稿会自己出现在「待审批」里（款是她自己在我们的目录里点的，不用对图），点一次「批准并执行」就建单并审核。
+          </div>
+          <div>
+            <button type="button" className="btn" disabled={busy || !p.active || deal.mode !== 'copilot'}
+              onClick={() => run({ action: 'site_link' }, '已请 Mac 建选款链接，带链接的那句话会出现在「待审批」里')}>
+              <LinkSimple />发选款链接
+            </button>
+            {(!p.active || deal.mode !== 'copilot') && <span className="dim" style={{ marginLeft: 8 }}>{!p.active ? '已停用的达人不发' : '先恢复副驾驶'}</span>}
+          </div>
+        </div>
+      )}
 
       {/* 直播手卡 (the deal action handcards, PRM_HANDCARDS, 2026-11-09): the Mac makes her cards, a person looks first */}
       {d?.handcards && <HandcardsBlock p={p} busy={busy} run={run} />}

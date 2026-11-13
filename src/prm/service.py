@@ -136,6 +136,9 @@ from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, PLATFORM_UNASKED, DraftError
 from .three_party import EVENT as GROUP_EVENT, TAKEN_BY as GROUP_TAKEN_BY, ThreeParty, state_out as group_state_out
 from .wechat_review import WechatReview, admin_problem, hats_of, preview_stamp
 from .admin_commands import ACTOR as ADMIN_ACTOR, DealCommands
+from .sample_site import (LINK as SITE_LINK, LINK_NOTE as SITE_LINK_NOTE, NO_LINK as SITE_NO_LINK, ORDER as SITE_ORDER,
+                          ORDER_OP as SITE_ORDER_OP, PULL_OP as SITE_PULL_OP, SampleSite, has_link as site_has_link,
+                          picked as site_picked)
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
     DRAFT_NOTE_CHARS, MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
@@ -723,6 +726,8 @@ def gap_notes(meta: dict) -> list[str]:
         notes.append(HUOPAN_NOTE)
     if isinstance(meta.get(HANDCARDS), dict):
         notes.append(HANDCARDS_NOTE)
+    if isinstance(meta.get(SITE_LINK), dict):          # 选款链接: ours, never out by a gate, the night or 自动模式
+        notes.append(SITE_LINK_NOTE)
     return notes
 
 
@@ -820,6 +825,8 @@ EVENT_NAMES = {
     "opening_auto": "开场白没人处理，自动发出", GROUP_LINE: "三方群里的一句话",
     "auto_register": "自动登记（新好友）", "opening": "派写开场白的任务", "huopan": "派补发货盘的任务",
     "handcards": "派做手卡的任务",
+    SITE_LINK: "派发选款链接的任务", SITE_ORDER: "选款网站：她自己选的款成了寄样单草稿（不用对图）",
+    "site_auto": "选款网站的寄样单自动批准执行（PRM_SAMPLE_SITE_AUTO）",
     "signed": "聚水潭显示签收，派问一句的任务",
     "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
     "buyin_draft_failed": "百应私信的草稿没写成",
@@ -1209,7 +1216,8 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
         final = p["final_text"] if p.get("final_text") is not None else p["text"]
         platform = platform_out(p)
         held: list = []
-        if photo_check and p.get("tool") == "jst.sample_order" and p["status"] == PENDING:
+        by_site = site_picked(p)                       # 选款网站的单: no photo check (``_approve_execute`` skips the same)
+        if photo_check and not by_site and p.get("tool") == "jst.sample_order" and p["status"] == PENDING:
             # PRM_DRAFT_CONTEXT: the hats its last preview held for photos (「对过图了，用 <编码>」) or let go only by a
             # confirmation (「撤销」); one taken back holds the draft until a new preview
             held = draft_context.held_out(p, confirmed_of(p["deal_id"]))
@@ -1217,18 +1225,19 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             if platform and platform["can_execute"] and gone:
                 platform = {**platform, "can_execute": False,
                             "problems": [*platform["problems"], draft_context.withdrawn_reason(gone)]}
-        if (p.get("tool") == "jst.sample_order" and p["status"] == PENDING and platform and platform["can_execute"]
-                and draft_context.sheets_gone(p)):
+        if (p.get("tool") == "jst.sample_order" and not by_site and p["status"] == PENDING and platform
+                and platform["can_execute"] and draft_context.sheets_gone(p)):
             # its 对图单 gone from this PC: off, why, as ``_approve_execute`` refuses it (final check 2026-11-10 B)
             platform = {**platform, "can_execute": False, "problems": [*platform["problems"], draft_context.SHEET_GONE]}
-        if p.get("tool") == "jst.sample_order" and p["status"] == PENDING and platform and platform["can_execute"]:
+        if (p.get("tool") == "jst.sample_order" and not by_site and p["status"] == PENDING and platform
+                and platform["can_execute"]):
             # a hat its last preview held that nobody confirmed since: off, why, the switch on or off, as
             # ``_approve_execute`` refuses it (review 2026-11-10 A-L4; 合并 fix1110-s: the switch off too)
             waiting = draft_context.held_unconfirmed(p, confirmed_of(p["deal_id"]))
             if waiting:
                 platform = {**platform, "can_execute": False,
                             "problems": [*platform["problems"], draft_context.held_reason(waiting, photo_check)]}
-        if photo_check and platform and platform["can_execute"] and draft_context.unchecked(p):
+        if photo_check and not by_site and platform and platform["can_execute"] and draft_context.unchecked(p):
             platform = {**platform, "can_execute": False,
                         "problems": [*platform["problems"], draft_context.unchecked_reason(p)]}
         return {
@@ -1251,6 +1260,8 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "tool": p.get("tool", MESSAGE_TOOL), "platform": platform,
             "night_held": str(p["meta"].get("night_held") or ""), "opening": bool(p["meta"].get(OPENING)),
             "huopan": bool(p["meta"].get(HUOPAN)), "signed": bool(p["meta"].get(SIGNED)),
+            "site_link": bool(p["meta"].get(SITE_LINK)),
+            "site_order": dict(p["meta"][SITE_ORDER]) if isinstance(p["meta"].get(SITE_ORDER), dict) else None,
             "handcards": ({**p["meta"][HANDCARDS], "expired": cards_expired(p, now)}
                           if isinstance(p["meta"].get(HANDCARDS), dict) else None),
             "channel": BUYIN_CHANNEL if is_buyin(p) else GROUP_CHANNEL if p["meta"].get("channel") == GROUP_CHANNEL
@@ -1769,6 +1780,9 @@ class PrmService:
         # 合作单指令 (PRM_WECHAT_COMMANDS, default off; src/prm/admin_commands.py): the console's deal buttons typed in the
         # admin's chat, 「做手卡 <达人>」 … (Bot._wire_friend_adds hands them over from src/admin.py while it is on)
         self.deal_commands = DealCommands(self, config, clock=clock)
+        # 选款网站 (PRM_SAMPLE_SITE_MIN, default off; src/prm/sample_site.py): her link, the rounds that take the site's
+        # new submissions, each one's sample order as a draft of the bot's own (no photo check)
+        self.sample_site = SampleSite(self, config)
         relay.register_kind(PRM, self.on_result)
 
     @property
@@ -3267,7 +3281,8 @@ class PrmService:
         a 签收后问一句, a 做手卡."""
         meta = packet.get("meta") or {}
         return (packet.get("job_id") is None or meta.get("lane") == LANE_SYSTEM or bool(meta.get(OPENING))
-                or bool(meta.get(HUOPAN)) or bool(meta.get(SIGNED)) or bool((meta.get(HANDCARDS) or {}).get("console")))
+                or bool(meta.get(HUOPAN)) or bool(meta.get(SIGNED)) or bool((meta.get(HANDCARDS) or {}).get("console"))
+                or bool(meta.get(SITE_LINK)))
 
     def _aim(self, packet: Optional[dict], *, wait: bool = False, sending: bool = False) -> Optional[dict]:
         """A packet the bot started itself still aimed at her private chat, for a creator with a linked group: where she
@@ -3913,6 +3928,8 @@ class PrmService:
             return self._on_sample_status(job, meta)
         if meta.get("op") == BUYIN_OP:                  # the new 百应 private messages: drafts come of them, not of it
             return self._on_buyin_inbox(job, meta)
+        if meta.get("op") == SITE_PULL_OP:              # 选款网站: the creators' new submissions, no creator, no draft
+            return self.sample_site.on_pull(job, meta)
         try:
             party_id, deal_id = int(meta["party_id"]), int(meta["deal_id"])
         except (KeyError, TypeError, ValueError):
@@ -3923,6 +3940,8 @@ class PrmService:
             return True
         now = self._clock()
         status = job["status"]
+        if meta.get("op") == SITE_ORDER_OP:             # 选款网站: one submission's sample order, a draft of the bot's own
+            return self.sample_site.on_order(job, meta, deal, now)
         if meta.get("channel") == BUYIN_CHANNEL:        # a 百应 private-message draft: its own way, never WeChat's
             return self._on_buyin_draft(job, meta, deal, now)
         if meta.get("op") in PLATFORM_OPS:
@@ -3981,6 +4000,12 @@ class PrmService:
             logger.warning("PRM: job #%d answer unusable: %s", job["id"], e)
             return True
         draft = self._mask_draft(party_id, draft, now)
+        if isinstance(meta.get(SITE_LINK), dict) and not site_has_link(draft.reply_draft):
+            # 选款链接 answered without a link (an older Mac worker lets the model write: nothing to send her)
+            self._drop_job_sheets(job["id"])
+            self._draft_failed(job, meta, f"#{job['id']} {SITE_NO_LINK}", notes, now)
+            logger.warning("PRM: job #%d (选款链接) came back without a link; no draft", job["id"])
+            return True
         if draft.platform_held == PLATFORM_UNASKED and closed and (meta.get("system_note") or not draft.reply_draft):
             # (its group closed meanwhile: as any draft back after its link ended, ``_closed_result``; her lines stay
             # that group's, a step is not owed again: 合并 channel-goods-convention 2026-11-09)
@@ -4172,6 +4197,8 @@ class PrmService:
             packet_meta[OPENING] = True                # (the console's tag; no holding reply for it)
         if isinstance(meta.get(HUOPAN), dict):
             packet_meta[HUOPAN] = True                 # (the console's tag)
+        if isinstance(meta.get(SITE_LINK), dict):
+            packet_meta[SITE_LINK] = True              # (选款链接: the console's tag; no holding reply for it)
         if cards is not None:                          # 直播手卡: the console's tag, the operator's note on the cards
             packet_meta[HANDCARDS] = {**handcards.packet_meta(cards),
                                       "console": isinstance(meta.get(HANDCARDS), dict)}
@@ -5223,6 +5250,8 @@ class PrmService:
             return self.ask_opening(data.get("deal_id"), actor=actor)
         if action == HUOPAN:
             return self.ask_huopan(data.get("deal_id"), actor=actor)
+        if action == SITE_LINK:                        # 「发选款链接」 {max?}: src/prm/sample_site.py
+            return self.sample_site.ask_link(data.get("deal_id"), data.get("max"), actor=actor)
         if action == HANDCARDS:
             return self.ask_handcards(data.get("deal_id"), data.get("items"), actor=actor)
         if action == DRAFT_NOTE:
@@ -6029,19 +6058,23 @@ class PrmService:
             return {"ok": False, "error": f"预览没通过，不能执行：{why}"}
         if data.get("previewing"):
             return {"ok": False, "error": PREVIEWING, "code": "previewing"}
-        if self._draft_context and draft_context.unchecked(packet):
+        # 选款网站的单 (src/prm/sample_site.py): she picked our own codes in our own catalogue, there is no picture of
+        # hers to tell a hat from: none of the photo checks below applies (no mark, no 对图单, no held hat)
+        by_site = site_picked(packet)
+        if self._draft_context and not by_site and draft_context.unchecked(packet):
             # PRM_DRAFT_CONTEXT: its last preview was not checked by photo (a draft from before the switch was on too), or
             # by an older rule (a v1 / v2 mark: 「这份是旧版 Mac 按旧规则核的…」)
             return {"ok": False, "error": draft_context.unchecked_reason(packet)}   # (each says to 重新预览)
-        gone = draft_context.withdrawn(packet, self._confirmed_codes(packet["deal_id"])) if self._draft_context else []
+        gone = (draft_context.withdrawn(packet, self._confirmed_codes(packet["deal_id"]))
+                if self._draft_context and not by_site else [])
         if gone:
             # PRM_DRAFT_CONTEXT: its last preview let a hat go only by a 「对过图了」 that was taken back (「撤销」) since
             return {"ok": False, "error": draft_context.withdrawn_reason(gone)}
-        if action.get("action") == SAMPLE_TOOL and draft_context.sheets_gone(packet):
+        if action.get("action") == SAMPLE_TOOL and not by_site and draft_context.sheets_gone(packet):
             # its 对图单 is not on this PC any more: nobody can look at it now (final check 2026-11-10 B)
             return {"ok": False, "error": draft_context.SHEET_GONE}
         held = (draft_context.held_unconfirmed(packet, self._confirmed_codes(packet["deal_id"]))
-                if action.get("action") == SAMPLE_TOOL else [])
+                if action.get("action") == SAMPLE_TOOL and not by_site else [])
         if held:
             # its last preview held a hat for photos nobody confirmed since: never run, whatever the verdict says (review
             # 2026-11-10 A-L4: a second line, the switch on or off; a ready preview holds none)
@@ -6312,7 +6345,10 @@ class PrmService:
         creator = self._creator_ids(packet["deal_id"])
         if creator:
             meta["creator"] = creator
-        if self._draft_context and action.get("action") == "jst.sample_order":
+        if site_picked(packet):
+            # 选款网站的单: the Mac previews it without its photo check and plans the audit again (worker.do_platform_job)
+            meta[SITE_ORDER] = {"id": (packet["meta"][SITE_ORDER] or {}).get("id")}
+        elif self._draft_context and action.get("action") == "jst.sample_order":
             # PRM_DRAFT_CONTEXT: the Mac checks the sample order by photo again (with the codes an operator confirmed for
             # the deal, 「对过图了」; and her deal's 起草备注, as a draft job carries it)
             meta[draft_context.KEY] = self._draft_context_meta(packet["deal_id"])
@@ -6391,7 +6427,8 @@ class PrmService:
                     block = None
             answered = block is not None                 # (the Mac's new preview itself, not the old one marked)
             gated = draft_context.gated_of(job.get("result_text"))
-            if answered and self._draft_context:
+            by_site = site_picked(packet)                # 选款网站的单: never checked by photo, never held for it
+            if answered and self._draft_context and not by_site:
                 block = draft_context.ungated(block, gated)
             if block is None:
                 why = refused or {"lost": "Mac 失联了", "cancelled": "任务被取消了"}.get(status) or _job_error(job)
@@ -6407,7 +6444,7 @@ class PrmService:
             new = {**data, "previewing": None, "previews": int(data.get("previews") or 0) + 1,
                    **({"preview": block} if block else {})}
             marks = None
-            if answered and (block.get("action") or {}).get("action") == "jst.sample_order" and (
+            if answered and not by_site and (block.get("action") or {}).get("action") == "jst.sample_order" and (
                     self._draft_context or draft_context.KEY in (packet.get("meta") or {})):
                 # PRM_DRAFT_CONTEXT: the packet keeps whether its last preview was checked by photo (approving asks); once
                 # it has a mark, with the switch off too (a preview nothing checked never keeps an older one's mark); and
@@ -6430,8 +6467,9 @@ class PrmService:
             # pictures; in two steps a notice in between had the new preview with the old sheet)
             files, extra_sheets = draft_context.preview_operator_files(
                 job.get("result_text"), self._relay.store.operator_files(job["id"]), self._relay.store.outfiles(job["id"]))
+            # (a 选款网站 order keeps its 选款单: a new preview makes no new one, her choice is the same)
             old = ([f["path"] for f in draft_context.files_of(packet) if f["path"] not in {g["path"] for g in files}]
-                   if answered else [])
+                   if answered and not by_site else [])
             sheets = {draft_context.OPERATOR_FILES: files} if answered and (files or old) else {}
             written = self._store.set_platform(packet["id"], new, (PENDING,),
                                                meta={**(marks or {}), **sheets} if marks is not None or sheets else None)
@@ -8163,6 +8201,7 @@ class PrmService:
             "clock_skew_sec": int(round(self._skew)), "sample_sync_min": self._sample_sync_sec // 60,
             "night": self._night_status(self._clock()), "auto_register": self._auto_register,
             "buyin_sync_min": self._buyin_sec // 60, "friend_add_status": self.friend_adds.status(),
+            "sample_site": self.sample_site.status(),
             "auto_mode": self.auto_mode, "three_party": self.three_party.status(),
             "reply_parts": self._reply_parts, "boss_groups": self.boss_groups.status(),
             "opening_auto_min": self._opening_auto_sec // 60,
@@ -8201,6 +8240,7 @@ class PrmService:
         self.sweep_signed_hellos()                     # PRM_SIGNED_HELLO: the 签收后问一句 owed (inside its hours)
         self.sweep_buyin()
         self.sweep_buyin_held()
+        self.sample_site.sweep()                       # PRM_SAMPLE_SITE_MIN: the 选款网站's new submissions (when due)
         now = self._clock()
         if now - self._last_retention >= RETENTION_CHECK_SEC:
             self._last_retention = now
@@ -8520,6 +8560,8 @@ class PrmService:
                 continue                                   # (registered by 「是 N」: nothing of her chat by itself)
             if (packet.get("meta") or {}).get(HUOPAN) and (job is None or not self._job_lines(job)):
                 continue                                   # 补发货盘: we started it, she said nothing to hold
+            if (packet.get("meta") or {}).get(SITE_LINK) and (job is None or not self._job_lines(job)):
+                continue                                   # 选款链接: the same
             if (packet.get("meta") or {}).get(SIGNED) and (job is None or not self._job_lines(job)):
                 continue                                   # 签收后问一句: the same
             if (((packet.get("meta") or {}).get(HANDCARDS) or {}).get("console")
@@ -9437,6 +9479,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
         elif action == HUOPAN:                         # (running: PrmService.ask_huopan)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能补发货盘"}
+        elif action == SITE_LINK:                      # (running: SampleSite.ask_link)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能发选款链接"}
         elif action == HANDCARDS:                      # (running: PrmService.ask_handcards)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能做手卡"}
         elif action in GROUP_ACTIONS:                  # (running: PrmService.three_party)

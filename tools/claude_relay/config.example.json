@@ -20,5 +20,23 @@
   "prm_timeout_min": 10,
   "prm_max_budget_usd": 0,
   "platforms": {},
-  "products_sync_hours": 0
+  "products_sync_hours": 0,
+  "sample_site": {
+    "url": "",
+    "token_file": "~/.claude-relay/sample-site.token",
+    "owner": "main",
+    "max_items": 3,
+    "expires_days": 14,
+    "audit": true,
+    "catalog": {
+      "source": "jst_hot30",
+      "top_n": 20,
+      "pinned": [],
+      "excluded": [],
+      "styles": [],
+      "names": {},
+      "descs": {},
+      "min_stock": 1
+    }
+  }
 }

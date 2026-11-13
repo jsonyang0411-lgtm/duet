@@ -288,6 +288,29 @@ CREATE TABLE IF NOT EXISTS prm_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
 );
+-- 选款网站 (src/prm/sample_site.py, PRM_SAMPLE_SITE_MIN): one row a submission the Mac took from the site, by the
+-- site's own id.  No receiver here (it is in the order's job and draft, as any sample order's); ``account`` is the
+-- 抖音号 she typed (a general link's: who she is).  state: queued (its order's job is with the Mac) | drafted (its
+-- draft is in 待审批: ``packet_id``) | unmatched (nobody on the list has that 抖音号) | failed (``why``; tried again).
+-- acked: the site was told we have it (it then keeps only masked remnants).
+CREATE TABLE IF NOT EXISTS site_orders (
+    id INTEGER PRIMARY KEY,
+    ref TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'personal',
+    account TEXT NOT NULL DEFAULT '',
+    party_id INTEGER,
+    deal_id INTEGER,
+    state TEXT NOT NULL,
+    job_id INTEGER,
+    packet_id INTEGER,
+    tries INTEGER NOT NULL DEFAULT 0,
+    why TEXT NOT NULL DEFAULT '',
+    hats INTEGER NOT NULL DEFAULT 0,
+    acked INTEGER NOT NULL DEFAULT 0,
+    told INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS friend_adds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source TEXT NOT NULL,
@@ -1796,6 +1819,64 @@ class PrmStore:
             self._conn.execute("INSERT INTO prm_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET"
                                " value = excluded.value", (key, str(value)))
             self._conn.commit()
+
+    # ── 选款网站 (PRM_SAMPLE_SITE_MIN, src/prm/sample_site.py) ─────────────────────────────
+
+    SITE_ORDER_FIELDS = ("ref", "kind", "account", "party_id", "deal_id", "state", "job_id", "packet_id", "tries",
+                         "why", "hats", "acked", "told")
+
+    def site_order(self, site_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM site_orders WHERE id = ?", (int(site_id),)).fetchone()
+        return dict(row) if row else None
+
+    def save_site_order(self, site_id: int, now: Optional[float] = None, **fields) -> dict:
+        """Write a submission's row (made when it is not there; ``fields``: ``SITE_ORDER_FIELDS``); returns it."""
+        now = time.time() if now is None else now
+        unknown = set(fields) - set(self.SITE_ORDER_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown site order fields: {sorted(unknown)}")
+        with self._lock:
+            self._conn.execute("INSERT OR IGNORE INTO site_orders (id, state, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                               (int(site_id), str(fields.get("state") or "queued"), now, now))
+            if fields:
+                self._conn.execute(
+                    f"UPDATE site_orders SET {', '.join(f'{k} = ?' for k in fields)}, updated_at = ? WHERE id = ?",
+                    (*fields.values(), now, int(site_id)))
+            self._conn.commit()
+            row = self._conn.execute("SELECT * FROM site_orders WHERE id = ?", (int(site_id),)).fetchone()
+        return dict(row)
+
+    def site_orders(self, state: Optional[str] = None, *, to_ack: bool = False, limit: int = 200) -> list[dict]:
+        """The submissions, newest first: all, of one ``state``, or (``to_ack``) the ones the site is still to be told
+        we have (their draft is in 待审批, or they were given up: ``drafted`` / ``dropped``, not acked yet)."""
+        sql, args = "SELECT * FROM site_orders", []
+        if to_ack:
+            sql += " WHERE acked = 0 AND state IN ('drafted', 'dropped')"
+        elif state is not None:
+            sql += " WHERE state = ?"
+            args.append(state)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+    def site_order_of_packet(self, packet_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM site_orders WHERE packet_id = ?", (int(packet_id),)).fetchone()
+        return dict(row) if row else None
+
+    def mark_site_acked(self, ids, now: Optional[float] = None) -> int:
+        """The site said it has these as acked; returns how many rows changed."""
+        ids = [int(i) for i in ids or []]
+        if not ids:
+            return 0
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE site_orders SET acked = 1, updated_at = ? WHERE acked = 0 AND id IN ({', '.join('?' * len(ids))})",
+                (now, *ids))
+            self._conn.commit()
+            return cur.rowcount
 
     # ── 加百应达人微信 (PRM_FRIEND_ADD, src/prm/friend_adds.py; CODEBASE_REFERENCE 功能 R) ─────
 
