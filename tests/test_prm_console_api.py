@@ -1208,3 +1208,34 @@ def test_the_running_console_shows_a_group_draft_where_it_goes(tmp_path):
     finally:
         server.register_prm(None)
         relay.stop()
+
+
+def test_the_boss_group_pick_is_shown_running_and_stopped_only_with_her_side(tmp_path, monkeypatch):
+    """老板拉的群里机器人自己选人 (2026-11-13): GET /api/prm's ``boss_groups`` has ``pick`` True only with PRM_BOSS_GROUPS,
+    PRM_BOSS_GROUP_PICK and PRM_GROUP_HER_SIDE on (the console's card and its hints), from the running bot and from .env
+    while it is stopped; no key at all otherwise."""
+    clock = Clock()
+    for side, want in (("on", True), ("off", False)):
+        cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                              claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                              claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                              prm_copilot="on", prm_db=":memory:", prm_boss_groups="on", prm_group_with="老板测试",
+                              prm_boss_group_pick="on", prm_group_her_side=side)
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+        prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+        server.register_prm(prm)
+        try:
+            assert call("/api/prm")[1]["boss_groups"].get("pick") is (True if want else None), side
+        finally:
+            server.register_prm(None)
+            relay.stop()
+    monkeypatch.chdir(tmp_path)                                    # the bot stopped
+    monkeypatch.delenv("PRM_DB", raising=False)
+    for env, want in (({"PRM_BOSS_GROUP_PICK": "on", "PRM_GROUP_HER_SIDE": "on"}, True),
+                      ({"PRM_BOSS_GROUP_PICK": "on", "PRM_GROUP_HER_SIDE": "off"}, None),
+                      ({"PRM_BOSS_GROUP_PICK": "off", "PRM_GROUP_HER_SIDE": "on"}, None)):
+        monkeypatch.setenv("PRM_COPILOT", "on")
+        monkeypatch.setenv("PRM_BOSS_GROUPS", "on")
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        assert call("/api/prm")[1]["boss_groups"].get("pick") is want, env

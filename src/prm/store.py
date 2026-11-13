@@ -471,6 +471,10 @@ _ADDED_COLUMNS = (
     # 群自己接上 (2026-11-11, review #2): when a person confirmed a group the scan linked by itself (a draft there sent by
     # a person, 「确认接群」, the console's 「是她的群」); None: every draft there waits for a person
     ("boss_groups", "confirmed_at", "REAL"),
+    # 老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK, 2026-11-13): how the scan chose whom the deal hangs on in a group with
+    # more than one person of her side ("title": the group's name has her name, "first": the first of her side to speak);
+    # "" = not chosen so (one person, or a person's 「是她」).  Until ``confirmed_at`` every draft there waits for a person
+    ("boss_groups", "picked", "TEXT NOT NULL DEFAULT ''"),
     # 微信里审批草稿 (src/prm/wechat_review.py), its second and third rounds (2026-11-09): a table made by the first
     ("wechat_reviews", "told_at", "REAL"),
     ("wechat_reviews", "preview", "TEXT NOT NULL DEFAULT ''"),
@@ -614,7 +618,8 @@ def friend_add_view(row: dict) -> dict:
 # 老板拉的群 (src/prm/boss_groups.py): the JSON columns of a group's row, and what may be set besides its state.
 BOSS_GROUP_JSON = {"members": [], "boss": [], "lines": []}
 BOSS_GROUP_FIELDS = {"name", "found_at", "made_at", "state", "party_id", "deal_id", "members", "boss", "why",
-                     "last_line_at", "lines", "replied_at", "opening_due", "joined_at", "manual", "confirmed_at"}
+                     "last_line_at", "lines", "replied_at", "opening_due", "joined_at", "manual", "confirmed_at",
+                     "picked"}
 
 
 def _seq(line: dict) -> int:
@@ -729,6 +734,24 @@ class PrmStore:
             )
             self._conn.commit()
             return dict(self._conn.execute("SELECT * FROM parties WHERE id = ?", (party_id,)).fetchone())
+
+    def set_party_wxid(self, party_id: int, wxid: str, now: Optional[float] = None) -> bool:
+        """老板拉的群里机器人自己选人 (src/prm/boss_groups.py ``rehook``, 2026-11-13): the deal of a group the scan took over
+        hangs on another member of her side from now on: the party's wxid becomes ``wxid`` (her 称呼, note, deal and
+        record stay).  False when there is no such party or another party (active or stopped) has that wxid."""
+        now = time.time() if now is None else now
+        wxid = str(wxid or "").strip()
+        if not wxid:
+            return False
+        with self._lock:
+            try:
+                cur = self._conn.execute("UPDATE parties SET wxid = ?, updated_at = ? WHERE id = ?",
+                                         (wxid, now, int(party_id)))
+            except sqlite3.IntegrityError:
+                self._conn.rollback()
+                return False
+            self._conn.commit()
+            return cur.rowcount == 1
 
     def party(self, party_id: int) -> Optional[dict]:
         with self._lock:

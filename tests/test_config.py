@@ -865,6 +865,22 @@ class BossGroupsConfigTests(unittest.TestCase):
                 _validate_config({field: "maybe"})
             self.assertIn(f"{name} must be off or on", str(ctx.exception))
 
+    def test_boss_group_pick_and_groups_review_are_off_by_default_and_only_off_or_on(self):
+        """PRM_BOSS_GROUP_PICK (老板拉的群里机器人自己选人) and PRM_GROUPS_REVIEW (群里的话都先审), 2026-11-13: off by default,
+        the usual yes / no spellings, anything else refused (on without the switches they need is not refused: the
+        console and 「接群」 say why)."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        for field, name in (("prm_boss_group_pick", "PRM_BOSS_GROUP_PICK"), ("prm_groups_review", "PRM_GROUPS_REVIEW")):
+            self.assertEqual(getattr(BotConfig(), field), "off")
+            for env, want in (({}, "off"), ({name: "on"}, "on"), ({name: "yes"}, "on"), ({name: "0"}, "off")):
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(getattr(load_config(), field), want, env)
+            _validate_config({field: "on"})
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({field: "maybe"})
+            self.assertIn(f"{name} must be off or on", str(ctx.exception))
+
     def test_what_the_mac_is_told_the_boss_is_called(self):
         """PRM_BOSS_CALL (review 2026-10-31): the bosses' names (PRM_GROUP_WITH) never leave this PC; a group job calls
         him this.  「老板」 by default and when empty, white space collapsed, 1 to 10 characters."""

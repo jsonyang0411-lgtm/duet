@@ -1031,7 +1031,9 @@ def test_a_group_the_scan_found_waiting_on_the_boss_group_card_is_chosen_there(c
                                members=[{"wxid": CREATOR, "name": "小美"}, {"wxid": TESTER, "name": "测试达人二号"}],
                                boss=[{"wxid": BOSS_ID, "name": BOSS}])
     assert "2. 品牌测试大群 · 12 人" in b.say("接群") and "老板拉的群，在「老板拉的群」卡片里选" in b.say("接群")
-    assert b.say("接群 2") == "群「品牌测试大群」是老板拉的群，在控制台「合作单」页顶上的「老板拉的群」卡片里等你选她：到那里点「是她」"
+    # (2026-11-13: the answer says the true reason it waits, BossGroups.waiting_why: here the pick is off)
+    assert b.say("接群 2") == ("群「品牌测试大群」是老板拉的群，还没接手：群里不止一个人可能是她，机器人不猜（PRM_BOSS_GROUP_PICK 关着）。"
+                             "要现在接就到控制台「合作单」页顶上的「老板拉的群」卡片里点她的「是她」")
     assert b.prm.boss_groups.offered() is None and b.prm.store.boss_group(BIG)["state"] == "pending"
     b.prm.boss_groups._on = False                                     # (switched off: no card, it may be asked about)
     assert b.say("接群 品牌测试大群").startswith("群「品牌测试大群」（12 人）里谁是达人？")
