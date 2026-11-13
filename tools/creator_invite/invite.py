@@ -6,7 +6,8 @@ plan（只读，什么都不发）：
   ``dy buyin author-invite-status`` 一次查一批平台状态，只留「邀约带货」（状态 1）的 → 帽子占比
   ≥ 90% 的单列为「疑似同行自播号」、女性粉丝低于 60% 的，都不进清单 → 按三类配话术和商品（主推
   1 款 + 配置里其余的都附带，一张卡最多 5 款；默认不看库存，配置 min_stock 大于 0 才查、才去掉
-  缺货的）→ 读出本周额度 → 写一份给人看的清单（Markdown + CSV）和一份给第二段用的 JSON。
+  缺货的）→ 状态 1 的再一批一批查百应的品牌集中度（``dy buyin author-portrait``），近 30 天最大的牌子占 ≥ 50% 的（只带
+  一个牌子 / 自己的牌子）不进 → 读出本周额度 → 写一份给人看的清单（Markdown + CSV）和一份给第二段用的 JSON。
 
 run（要 ``--confirm <清单编号>`` 和清单文件）：只发清单里的人。每位先只读预览，再带
 ``--expect-status 1 --expect-popwindow -1 --execute`` 发送（预览绑定执行）。发一位记一位：本地台账
@@ -116,8 +117,11 @@ DEFAULT_RULES = {
     "min_sales30d": 10000,                                 # 近 30 天销售额区间下限低于 1 万元
     "hidden_sales_min_level": 3,                           # 销售额不公开（无数据）时，等级低于 LV3
     "min_sales_per_fan": 0.2, "sales_per_fan_from": 50000, # 粉丝 5 万以上时，销售额下限 ÷ 粉丝数不到 0.2 元
-    # 只标出来给人看：帽子占比高（可能自己做帽子）、近 30 天几乎只卖一类别的货（可能只带一个牌子）
+    # 只标出来给人看：帽子占比高（可能自己做帽子）、近 30 天几乎只卖一类别的货（可能只带一个牌子：只在品牌集中度不知道时才这样猜）
     "own_hat_flag": 50.0, "single_category_flag": 90.0,
+    # 只带一个牌子 / 自己的牌子的不进（用户 2026-11-13）：百应达人主页的「品牌集中度」（近 30 天 TOP5）里最大的那个牌子（不算「其他」）
+    # 占 ≥ 它（%）就不进；0 = 不查。以前按品类猜（一类货占 ≥ 90% 就提醒），可一位 93% 卖一类货的达人最大的牌子只占 5%
+    "single_brand_max": 50.0,
     "drop_ids": [], "keep_ids": [],                        # 手动：一定不要的抖音号 / 不按「自己牌子」「骗样」两组规则去掉的抖音号
 }
 
@@ -286,6 +290,7 @@ def load_config(path: Optional[str]) -> dict:
     rules = dict(DEFAULT_RULES)
     rules.update(raw.get("rules") or {})
     rules["fans_price_min"] = _number(rules, "fans_price_min", 0, 0, 500)   # 档位最高「500元以上」：再高谁都进不来
+    rules["single_brand_max"] = _number(rules, "single_brand_max", 50.0, 0, 100)
     for key in ("own_brand_words", "own_brand_except"):
         try:
             re.compile(str(rules[key] or ""))
@@ -786,6 +791,94 @@ def creator_view(row: dict) -> dict:
     }
 
 
+# ── 品牌集中度（百应达人主页，近 30 天 TOP5；用户 2026-11-13）──────────────────────────
+# 「只卖一个牌子或者是自己牌子」的不邀约。以前按品类猜（近 30 天一类货占 ≥ 90%），可一位 93% 卖一类货的达人，最大的牌子只占 5%。
+# douyin-engineering 的只读命令 ``buyin author-portrait --aweme-id <抖音号> [--aweme-id …] --expect-shop-id=<n> --no-open``，
+# 一次一批（每批就是一次状态查询里状态 1 的那几位：一份清单多出几次调用、几十个请求，不是几百个）。
+
+BRAND_OTHER = "其他"                                         # 百应 TOP5 里「其他」那一行：不是一个牌子
+BRAND_UNKNOWN = "品牌集中度不知道"
+BRAND_CLI = ["buyin", "author-portrait"]
+
+
+def _ratio_percent(value) -> Optional[float]:
+    """百应给的占比（0–1）→ 百分数，一位小数；读不懂、超出 0–1 是 None。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+        return None
+    return round(float(value) * 100, 1)
+
+
+def _brand_name(value) -> str:
+    """牌子的名字放进清单：压成一行、去掉表格的竖线，最多 40 个字。"""
+    return re.sub(r"\s+", " ", str(value or "").replace("|", "/")).strip()[:40]
+
+
+def brand_view(entry) -> dict:
+    """一位达人的品牌集中度（``author-portrait`` 回答里的一项）：``brand_top`` 最大的牌子（不算「其他」）、``brand_top_share``
+    它的占比（%，一位小数）、``brand_top5`` 平台给的 TOP5 [[名字, %], …]（「其他」也在里面）。没找到她、列表是空的、只有「其他」、
+    读不懂：名字和占比是 None（不知道）。"""
+    out = {"brand_top": None, "brand_top_share": None, "brand_top5": []}
+    if not isinstance(entry, dict) or entry.get("found") is not True:
+        return out
+    for b in entry.get("brandTop") or []:
+        share = _ratio_percent(b.get("ratio")) if isinstance(b, dict) else None
+        name = _brand_name(b.get("name")) if isinstance(b, dict) else ""
+        if name and share is not None and len(out["brand_top5"]) < 6:
+            out["brand_top5"].append([name, share])
+    best = entry.get("topBrand") if isinstance(entry.get("topBrand"), dict) else {}
+    name, share = _brand_name(best.get("name")), _ratio_percent(best.get("ratio"))
+    if not name or name == BRAND_OTHER or share is None:     # topBrand 没给或读不懂：从 TOP5 里挑最大的那个牌子
+        named = [b for b in out["brand_top5"] if b[0] != BRAND_OTHER]
+        name, share = max(named, key=lambda b: b[1]) if named else ("", None)
+    if name and share is not None:
+        out["brand_top"], out["brand_top_share"] = name, share
+    return out
+
+
+def brand_portraits(cfg: dict, clis: Clis, ids: List[str], state: dict) -> Dict[str, dict]:
+    """问一批达人的品牌集中度（只读，一次调用），回 {抖音号: 回答里她那一项}（只有找到的）。问不了的时候回 {}、记进 ``state``，
+    之后整份清单不再问（不知道的达人留在清单里、标「品牌集中度不知道」）：命令行没有这条命令（``missing``，旧的 douyin-engineering）、
+    限流 76（``stopped``：也不再问别的抖音请求）、别的出错或超时（``failed``）。登录失效 77、不是这家店 79、核对不了登录：和别的
+    读命令一样立刻停（``StopRun``）。``state["requests"]`` 加上这次的平台请求（照放慢包装的请求记录数）。"""
+    if not ids or not state["on"] or state["missing"] or state["stopped"] or state["failed"]:
+        return {}
+    before = clis.requests().get("dy", 0)
+    result = clis.run("dy", [*BRAND_CLI, *[f"--aweme-id={a}" for a in ids], f"--expect-shop-id={cfg['dy_expect_shop_id']}", "--no-open"], 900)
+    state["calls"] += 1
+    state["requests"] += max(clis.requests().get("dy", 0) - before, 0)
+    said = result.said()
+    if result.exit_code == EXIT_USAGE and "unknown command" in result.stderr:
+        state["missing"] = True
+        return {}
+    if result.exit_code == EXIT_WALL:
+        state["stopped"] = f"查品牌集中度时平台限流（{said[:120]}）"
+        return {}
+    if result.exit_code in STOP_EXITS:
+        raise StopRun(f"抖音查品牌集中度：{STOP_EXITS[result.exit_code]}，立刻停下。命令行说：{said}", result.exit_code)
+    if result.unverifiable():
+        raise StopRun(f"抖音查品牌集中度：{LOGIN_HINT}。命令行说：{said}")
+    if result.timed_out or result.exit_code != 0 or result.data is None:
+        state["failed"] = "查品牌集中度超时" if result.timed_out else f"查品牌集中度出错（退出码 {result.exit_code}{'：' + said[:120] if said else ''}）"
+        return {}
+    state["asked"] += len(ids)
+    wanted = set(ids)
+    return {str(c.get("awemeId")): c for c in result.data.get("creators") or []
+            if isinstance(c, dict) and str(c.get("awemeId") or "") in wanted and c.get("found") is True}
+
+
+def brand_notes(state: dict) -> List[str]:
+    """品牌集中度这份清单只说一次的话：命令行没有这条命令、限流停了、出错停了。"""
+    notes = []
+    if state["missing"]:
+        notes.append("抖音命令行还没有 buyin author-portrait（douyin-engineering 旧了）：这次没查品牌集中度，"
+                     "「只带一个牌子」只按近 30 天的品类占比提醒；更新 douyin-engineering 以后重新出清单才查")
+    if state["stopped"]:
+        notes.append(f"{state['stopped']}：不再往下查，品牌集中度和后面的平台状态都没查，已经查好的照常进清单；过一会儿重新出清单再查")
+    if state["failed"]:
+        notes.append(f"{state['failed']}：后面的不再查，没查到的标「{BRAND_UNKNOWN}」、照常进清单")
+    return notes
+
+
 def _both_routes(pool: List[dict]) -> List[dict]:
     """Inside one category: the ones who sell no hats first (2026-11-02, the user: of the 19 invited who sold some hats none
     answered, of the 77 who sold none 8 did), then the fewer flags; a tie is taken from the two routes (聚水潭 / 抖音) in turn,
@@ -834,6 +927,7 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
     invited = ledger.never_again()
     excluded: List[dict] = list(douyin["excluded"])
     candidates: List[dict] = []
+    category_flags: Dict[str, str] = {}                   # 抖音号 → 按品类猜的「可能只带一个牌子」那条提醒
     stems: Dict[str, int] = {}
     for aweme, nick in {str(r.get("platformNo") or ""): str(r.get("nickName") or "") for r in rows}.items():
         stem = name_stem(nick)
@@ -890,16 +984,20 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
             flags.append(f"帽子占比 {view['hat_share']}%：可能自己做帽子，发之前看一眼她的橱窗")
         cat, share = top_category(row)
         if cat and cat != "帽子" and share >= rules["single_category_flag"]:
-            flags.append(f"近 30 天 {share:g}% 是{cat}：可能只带一个牌子，看一眼")
+            # 只是猜：查到品牌集中度以后去掉（那才是准的），查不到才留着
+            category_flags[aweme] = f"近 30 天 {share:g}% 是{cat}：可能只带一个牌子，看一眼"
+            flags.append(category_flags[aweme])
         candidates.append({**view, "category": category, "flags": flags})
     candidates = mix_categories(candidates)
     picked: List[dict] = []
     spare: List[dict] = []
     quotas: List[dict] = []
+    brand = {"on": bool(rules["single_brand_max"]), "asked": 0, "known": 0, "excluded": 0, "calls": 0, "requests": 0,
+             "missing": False, "stopped": None, "failed": None}
     checked = 0
     limit_checks = count + 20
     for start in range(0, len(candidates), 20):
-        if len(picked) >= count or checked >= limit_checks:
+        if len(picked) >= count or checked >= limit_checks or brand["stopped"]:
             break
         chunk = candidates[start:start + 20]
         checked += len(chunk)
@@ -910,6 +1008,7 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         for q in (data.get("summary") or {}).get("weeklyQuotas") or []:
             if isinstance(q, dict) and q not in quotas:
                 quotas.append(q)
+        invitable = []
         for c in chunk:
             s = by_id.get(c["aweme_id"])
             if not s or not s.get("found"):
@@ -917,11 +1016,32 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
             elif s.get("status") != NOT_INVITED:
                 excluded.append({**c, "reason": f"平台状态不是「邀约带货」：{s.get('button') or s.get('why') or s.get('status')}", "status": s.get("status")})
             else:
-                chosen = assign_products(c.get("avg_price"), usable)
-                entry = {**c, "status": s.get("status"), "button": s.get("button"), "weekly_quota": s.get("weeklyQuota"),
-                         "products": {"main": chosen[0]["id"], "extras": [p["id"] for p in chosen[1:]]},
-                         "content": cfg["templates"][c["category"]]}
-                (picked if len(picked) < count else spare).append(entry)
+                invitable.append((c, s))
+        # 过了别的每一条规则、平台上也能邀约的这几位，才问品牌集中度（一批一次）
+        portraits = brand_portraits(cfg, clis, [c["aweme_id"] for c, _ in invitable], brand)
+        for c, s in invitable:
+            seen_brand = brand_view(portraits.get(c["aweme_id"]))
+            flags = list(c["flags"])
+            top, top_share = seen_brand["brand_top"], seen_brand["brand_top_share"]
+            if top_share is not None:
+                brand["known"] += 1
+                if c["aweme_id"] in category_flags:      # 准的有了，猜的不要
+                    flags.remove(category_flags[c["aweme_id"]])
+                if rules["single_brand_max"] and top_share >= rules["single_brand_max"]:
+                    if c["aweme_id"] not in rules["keep_ids"]:
+                        brand["excluded"] += 1
+                        excluded.append({**c, **seen_brand, "flags": flags, "status": s.get("status"), "group": "single_brand",
+                                         "reason": f"近 30 天 {top_share:g}% 是同一个牌子（{top}）：只带一个牌子 / 自己的牌子"
+                                                   f"（品牌集中度 ≥ {rules['single_brand_max']:g}%）"})
+                        continue
+                    flags.append(f"近 30 天 {top_share:g}% 是同一个牌子（{top}）：rules.keep_ids 留下的，看一眼")
+            elif brand["on"] and not brand["missing"]:
+                flags.append(BRAND_UNKNOWN)               # 没找到、列表空、出错、限流：不去掉，标出来
+            chosen = assign_products(c.get("avg_price"), usable)
+            entry = {**c, **seen_brand, "flags": flags, "status": s.get("status"), "button": s.get("button"),
+                     "weekly_quota": s.get("weeklyQuota"), "products": {"main": chosen[0]["id"], "extras": [p["id"] for p in chosen[1:]]},
+                     "content": cfg["templates"][c["category"]]}
+            (picked if len(picked) < count else spare).append(entry)
     not_checked = candidates[checked:]
     order = {k: i for i, k in enumerate(CATEGORY_ORDER)}
     picked.sort(key=lambda c: order[c["category"]])
@@ -937,6 +1057,9 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         "templates": cfg["templates"], "creators": picked, "spare": spare, "excluded": excluded,
         "not_checked": len(not_checked), "requests": clis.requests(),
         "douyin": {k: douyin[k] for k in ("found", "new", "looked_up", "not_looked_up", "stopped")} | {"both": len(douyin["both"])},
+        "brand": {"single_brand_max": rules["single_brand_max"], "missing_command": brand["missing"],
+                  **{k: brand[k] for k in ("asked", "known", "excluded", "calls", "requests", "stopped", "failed")}},
+        "notes": brand_notes(brand),
     }
 
 
@@ -982,8 +1105,19 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
           f"新的 {dy.get('new', 0)} 位按抖音号到聚水潭查了 {dy.get('looked_up', 0)} 位"
           + (f"，还有 {dy['not_looked_up']} 位没查" + ("" if dy.get("stopped") else f"（超过一次最多查的 {f.get('dy_lookup_max')} 位）")
              if dy.get("not_looked_up") else "") + (f"。**{dy['stopped']}**" if dy.get("stopped") else "") + "\n")
+    b = plan.get("brand") or {}                                # 2026-11-13 以前生成的清单没有
+    rule = b.get("single_brand_max") or 0
+    if b and not rule:
+        w("- 品牌集中度：没查（rules.single_brand_max 是 0），「只带一个牌子」只按近 30 天的品类占比提醒\n")
+    elif b and not b.get("missing_command"):
+        w(f"- 品牌集中度（百应达人主页的 TOP5，近 30 天；最大的牌子不算「其他」）：平台上能邀约的问了 {b.get('asked', 0)} 位、"
+          f"{b.get('known', 0)} 位查到；最大的牌子占 ≥ {rule:g}% 的不进清单（{b.get('excluded', 0)} 位，rules.single_brand_max），"
+          f"查不到的照常进、标「{BRAND_UNKNOWN}」\n")
+    for note in plan.get("notes") or []:
+        w(f"- **{note}**\n")
     req = plan.get("requests") or {}
-    w(f"- 生成这份清单用了平台请求：聚水潭 {req.get('jst', 0)} 次、抖音 {req.get('dy', 0)} 次\n\n")
+    w(f"- 生成这份清单用了平台请求：聚水潭 {req.get('jst', 0)} 次、抖音 {req.get('dy', 0)} 次"
+      + (f"（其中查品牌集中度 {b.get('requests', 0)} 次）" if b.get("calls") and not b.get("missing_command") else "") + "\n\n")
     w(f"## 商品（主推 1 款 + 其余{'有货的' if s['min_stock'] else '的'}都附带；"
       + (f"可用库存低于 {s['min_stock']} 的不配" if s["min_stock"] else "不看库存，能挂上卡的都配") + "）\n\n")
     w("| 商品 ID | 名字 | 售价 | 聚水潭款号 | 可用库存 | 配不配 |\n|---|---|---|---|---|---|\n")
@@ -996,25 +1130,27 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
         w(f"## {CATEGORY_NAMES[key]}（{len(rows)} 位）\n\n")
         if not rows:
             continue
-        w("| # | 来源 | 抖音号 | 昵称 | 粉丝 | 近 30 天销售额 | 件单价 | 粉丝客单价 | 等级 | 主播类型 | 帽子占比 | 女粉 | 粉丝人群 | 主推 / 附带 | 状态 | 提醒 |\n"
-          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+        w("| # | 来源 | 抖音号 | 昵称 | 粉丝 | 近 30 天销售额 | 件单价 | 粉丝客单价 | 等级 | 主播类型 | 帽子占比 | 女粉 | 粉丝人群 | 最大的牌子 | 主推 / 附带 | 状态 | 提醒 |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
         for i, c in enumerate(rows, 1):
             prods = names.get(c["products"]["main"], c["products"]["main"]) + " / " + "、".join(names.get(x, x) for x in c["products"]["extras"])
             w(f"| {i} | {c.get('source') or '聚水潭'} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['sales30d'] or '-'} | {c['avg_price']} | "
               f"{c.get('fans_price') or '-'} | LV{c['level']} | {c['channel'] or '-'} | "
               f"{'-' if c['hat_share'] is None else str(c['hat_share']) + '%'} | {'-' if c['female_share'] is None else str(c['female_share']) + '%'} | "
-              f"{c.get('fans_crowd') or '-'} | {prods} | {c.get('button') or c.get('status')} | {'；'.join(c['flags'])} |\n")
+              f"{c.get('fans_crowd') or '-'} | {brand_cell(c)} | {prods} | {c.get('button') or c.get('status')} | {'；'.join(c['flags'])} |\n")
         w("\n")
     w("## 话术（按类别，字数按命令行的算法）\n\n")
     for key in CATEGORY_ORDER:
         w(f"- **{CATEGORY_NAMES[key]}**（{js_length(plan['templates'][key])} 字）：{plan['templates'][key]}\n")
     suspects = [c for c in plan["excluded"] if c.get("suspect")]
-    own = [c for c in plan["excluded"] if c.get("group") == "own_brand"]
+    own = [c for c in plan["excluded"] if c.get("group") in ("own_brand", "single_brand")]
     risky = [c for c in plan["excluded"] if c.get("group") == "sample_risk"]
-    others = [c for c in plan["excluded"] if not c.get("suspect") and c.get("group") not in ("own_brand", "sample_risk")]
+    others = [c for c in plan["excluded"] if not c.get("suspect") and c.get("group") not in ("own_brand", "single_brand", "sample_risk")]
     w(f"\n## 疑似同行自播号（帽子占比 ≥ {plan['settings']['rules']['suspect_hat_share']:g}%，默认不进清单，{len(suspects)} 位）\n\n")
     excluded_table(w, suspects)
-    w(f"\n## 专门带自己牌子的（名字像店铺 / 品牌号、店铺矩阵号，不进清单，{len(own)} 位；要留下哪位，把抖音号写进配置 rules.keep_ids）\n\n")
+    w(f"\n## 专门带自己牌子的（名字像店铺 / 品牌号、店铺矩阵号"
+      + (f"、近 30 天最大的牌子占 ≥ {rule:g}%（品牌集中度）" if rule else "")
+      + f"，不进清单，{len(own)} 位；要留下哪位，把抖音号写进配置 rules.keep_ids）\n\n")
     excluded_table(w, own)
     w(f"\n## 可能骗样品的（带货等级低、卖得少、销售额不公开、粉多卖少，不进清单，{len(risky)} 位；要留下哪位，写进 rules.keep_ids）\n\n")
     excluded_table(w, risky)
@@ -1022,13 +1158,20 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     excluded_table(w, others)
     if plan.get("spare"):
         w(f"\n## 备选（查过状态、可以邀约，清单已够数，{len(plan['spare'])} 位）\n\n")
-        w("| 类别 | 抖音号 | 昵称 | 粉丝 | 件单价 | 粉丝客单价 | 帽子占比 | 提醒 |\n|---|---|---|---|---|---|---|---|\n")
+        w("| 类别 | 抖音号 | 昵称 | 粉丝 | 件单价 | 粉丝客单价 | 帽子占比 | 最大的牌子 | 提醒 |\n|---|---|---|---|---|---|---|---|---|\n")
         for c in plan["spare"]:
             w(f"| {CATEGORY_NAMES[c['category']]} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['avg_price']} | {c.get('fans_price') or '-'} | "
-              f"{'-' if c['hat_share'] is None else str(c['hat_share']) + '%'} | {'；'.join(c['flags'])} |\n")
+              f"{'-' if c['hat_share'] is None else str(c['hat_share']) + '%'} | {brand_cell(c)} | {'；'.join(c['flags'])} |\n")
     if plan.get("not_checked"):
-        w(f"\n另有 {plan['not_checked']} 位符合条件、还没查平台状态（清单已够数）。\n")
+        why = "查品牌集中度时平台限流，没再往下查" if (plan.get("brand") or {}).get("stopped") else "清单已够数"
+        w(f"\n另有 {plan['not_checked']} 位符合条件、还没查平台状态（{why}）。\n")
     return out.getvalue()
+
+
+def brand_cell(c: dict) -> str:
+    """清单里「最大的牌子」那一格：「牌子 5%」；不知道（没查、查不到）是「-」。"""
+    share = c.get("brand_top_share")
+    return f"{c.get('brand_top')} {share:g}%" if c.get("brand_top") and isinstance(share, (int, float)) else "-"
 
 
 def excluded_table(w, rows: List[dict]) -> None:
@@ -1046,10 +1189,11 @@ def plan_csv(plan: dict) -> str:
     out = io.StringIO()
     writer = csv.writer(out)
     writer.writerow(["类别", "来源", "抖音号", "昵称", "粉丝", "近30天销售额", "件单价", "粉丝客单价", "等级", "主播类型", "帽子占比%", "女粉%", "粉丝人群",
-                     "主推", "附带", "状态", "提醒", "话术"])
+                     "最大的牌子", "最大的牌子占比%", "主推", "附带", "状态", "提醒", "话术"])
     for c in plan["creators"]:
         writer.writerow([CATEGORY_NAMES[c["category"]], c.get("source") or "聚水潭", c["aweme_id"], c["nickname"], c["fans"], c["sales30d"], c["avg_price"],
                          c.get("fans_price"), c["level"], c["channel"], c["hat_share"], c["female_share"], c.get("fans_crowd"),
+                         c.get("brand_top"), c.get("brand_top_share"),
                          names.get(c["products"]["main"]), "、".join(names.get(x, x) for x in c["products"]["extras"]),
                          c.get("button"), "；".join(c["flags"]), c["content"]])
     return out.getvalue()
@@ -1482,6 +1626,7 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
             by_cat = {CATEGORY_NAMES[k]: sum(1 for c in plan["creators"] if c["category"] == k) for k in CATEGORY_ORDER}
             stdout.write(json.dumps({"plan_id": plan["plan_id"], "files": {k: str(v) for k, v in paths.items()}, "creators": len(plan["creators"]),
                                      "by_category": by_cat, "excluded": len(plan["excluded"]), "requests": plan["requests"],
+                                     **({"notes": plan["notes"]} if plan["notes"] else {}),
                                      "next": f"用户确认后：python3 tools/creator_invite/invite.py run --config <配置> --plan {paths['json']} --confirm {plan['plan_id']}"},
                                     ensure_ascii=False, indent=1) + "\n")
             return EXIT_OK

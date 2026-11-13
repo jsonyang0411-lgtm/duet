@@ -151,6 +151,7 @@ from ..admin import HELP_COMMANDS
 from ..relay.commands import ALLOW_WORDS, DENY_WORDS, prefix_pattern
 from ..relay.service import MAX_AGE_SEC
 from . import contact, deals, draft_context, handcards, pii, platforms, retention
+from .sample_site import picked as site_picked
 from .boss_groups import CHANNEL as GROUP_CHANNEL, REACH_LAST_SPOKE
 from .store import (APPROVED, BUYIN_TOOL, COPILOT, DROPPED, EXECUTING, FAILED, MESSAGE_TOOL, NO_REPLY, PENDING, SENDING,
                     SENT, SUPERSEDED, PrmStore)
@@ -1563,6 +1564,8 @@ class WechatReview:
         the console."""
         if packet.get("tool") != SAMPLE_TOOL or packet.get("status") != PENDING:
             return ""
+        if site_picked(packet):
+            return ""                              # 选款网站的单 (sample_site.py): she picked our codes, no photo check
         confirmed = self._confirmed(packet)
         if not self._draft_context:
             # the switch off: only a hat its last preview held that nobody confirmed (``_approve_execute`` refuses it

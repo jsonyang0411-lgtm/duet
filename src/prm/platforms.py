@@ -2446,7 +2446,9 @@ PLANS = {
     "dy.channel_goods": (("create", "bind"),),
     "dy.creator_invite": (("invite",),),
     "tb.campaign": (("create",),),
-    "jst.sample_order": (("create",),),
+    # ("create", "audit"): 选款网站的单 (2026-11-13) — 建好以后接着审核通过（`jst sample-audit`）。只有 Mac 的预览会给出这个
+    # 计划（``context["audit"]``：worker 的 do_site_order_job），起草的模型给不出来：计划不在动作的参数里
+    "jst.sample_order": (("create",), ("create", "audit")),
 }
 _VERDICT_RANK = ("error", "wrong_account", "wall", "login", "unavailable", "invalid", "blocked", "ready")
 
@@ -3570,7 +3572,10 @@ def _sync_tb(cfg: dict, progress) -> dict:
 # A draft's phone is 〈手机N〉: the preview goes without it; the bot puts the number in when the
 # approved action comes back to be executed.
 
-JST_STEPS = {"preview": "聚水潭 · 寄样单预览（只读：商品、达人、地址、快递、查重）", "create": "聚水潭 · 建寄样单"}
+JST_STEPS = {"preview": "聚水潭 · 寄样单预览（只读：商品、达人、地址、快递、查重）", "create": "聚水潭 · 建寄样单",
+             "audit": "聚水潭 · 审核寄样单（待审核 → 待发货）"}
+AUDIT_FACT = "建好以后接着审核通过（待审核 → 待发货，审过仓库就发货）"
+_AUDIT_NO = re.compile(r"^YP\d{6,}$")                  # what `jst sample-audit --order-no` takes
 # The CLI's [TAG]s of a run that ended before its order could be sent.
 _JST_TAGS = ("USAGE", "REFUSED", "NOT_LOGGED_IN", "RISK", "WRONG_ACCOUNT", "NO_BROWSER", "AMBIGUOUS")
 
@@ -3678,7 +3683,10 @@ def _jst_facts(data: dict, rec: dict) -> None:
 
 
 def _preview_jst(action: dict, cfg: dict, run_one, block: dict, context: dict) -> None:
-    block["run"] = {"steps": ["create"]}
+    # ``context["audit"]`` (选款网站的单): the approval also audits the new order (``_jst_audit``)
+    block["run"] = {"steps": ["create", "audit"] if context.get("audit") is True else ["create"]}
+    if context.get("audit") is True:
+        block["facts"].append(_fact("执行时还会做", AUDIT_FACT))
     try:
         spec = _jst_spec(action, cfg, context.get("catalog"), execute=False)
     except ActionError as e:
@@ -3737,6 +3745,37 @@ def _jst_outcome(run: CliRun, data, rec: dict) -> str:
     return outcome
 
 
+def _jst_audit(cfg: dict, number: str, run_one, record: dict) -> None:
+    """The plan's second step (``("create", "audit")``, 选款网站的单): `jst sample-audit --order-no <YP…> --execute`,
+    sent once, for the order the step before made and verified.  Its outcome is the CLI's (``ALREADY_DONE``: nothing
+    to do); one the platform refused is ``PARTIAL`` here (the order IS made, only not audited: 「平台拒绝了，或者没有发出」
+    would read as if nothing had happened), and the record says the order's number and to audit it in the page, never
+    to make a second order."""
+    who = [f"--expect-uid={cfg['jst_expect_uid']}"] if cfg.get("jst_expect_uid") else []
+    run = run_one([cfg["node"], CLI_FILES["jst"], "sample-audit", f"--order-no={number}", *who, "--execute"], "jst", True)
+    data = parse_json(run.stdout)
+    rec = _step("audit", JST_STEPS["audit"], run, True)
+    record["steps"].append(rec)
+    said = data.get("outcome") if isinstance(data, dict) else None
+    if said == VERIFIED:
+        rec["outcome"] = VERIFIED
+    elif said == "ALREADY_DONE":
+        rec["outcome"] = "NO_CHANGE_NEEDED"
+    elif said in ("ACCEPTED_UNVERIFIED", "INDETERMINATE"):
+        rec["outcome"] = said
+    elif isinstance(data, dict) or (not run.error and not run.stopped and run.exit_code in (1, 2, 76, 77, 79)):
+        rec["outcome"] = "PARTIAL"                   # (refused, a wall, a login lapsed, not this sub-account: not audited)
+    else:
+        rec["outcome"] = "INDETERMINATE"             # (cut off, no answer: it may have gone through)
+    if isinstance(data, dict) and data.get("note"):
+        rec["facts"].append(_fact("审核", _clip(data["note"], 300)))
+    if rec["outcome"] not in _DONE:
+        why = _clip(data.get("note"), 300) if isinstance(data, dict) and data.get("note") else _exit_problem(run)
+        rec["problems"].append(why)
+        record["problems"].append(f"聚水潭寄样单 {number} 已经建好，审核没做成（{why}）：到聚水潭寄样管理里看这张单、"
+                                  "点「审核通过」，不要再建一张")
+
+
 def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, catalog: Optional[dict] = None) -> None:
     try:
         spec = _jst_spec(action, cfg, catalog, execute=True)
@@ -3769,6 +3808,13 @@ def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, cat
         line = "；".join(t for t in (f"聚水潭寄样单 {number}" if number else "", _clip(note or "", 300)) if t)
         if line:
             record["problems"].append(line)
+    elif "audit" in (plan.get("steps") or ()):
+        number = record["created"].get("sample_order_no") or ""
+        if _AUDIT_NO.match(number):
+            _jst_audit(cfg, number, run_one, record)
+        else:                                            # (a number the audit command would refuse: said, not tried)
+            record["incomplete"] = True
+            record["problems"].append(f"聚水潭寄样单 {number} 已经建好，单号的样子审核命令不认，没有审核：到聚水潭寄样管理里点「审核通过」")
 
 
 # ── 聚水潭: where sample orders stand (`jst samples`, read-only; the bot's PRM_SAMPLE_SYNC_MIN) ──

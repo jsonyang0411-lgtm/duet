@@ -1092,6 +1092,64 @@ class TestPrmPages:
         block = page.locator(".prm-huopan")
         assert block.locator("button:has-text('补发货盘')").is_disabled() and "先恢复副驾驶" in block.inner_text()
 
+    def test_deals_page_sends_a_pick_link_and_the_review_page_tags_it_and_her_site_order(self, page, prm):
+        """选款网站 (PRM_SAMPLE_SITE_MIN, 2026-11-13): with the switch off an opened deal shows no 「发选款链接」; on, the
+        block is there and a click (her waiting draft dropped first) asks the Mac for her link, whose sentence waits in
+        待审批 tagged 选款链接; the sample order she picked on the site waits tagged 网站选款, 「批准并执行」 on (no photo
+        check stands in its way)."""
+        import json as _json
+        from src.prm.service import SETTLE_SEC
+        from test_prm_sample_site import ACCOUNT, order_answer, pull_answer, submission
+
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        assert page.locator(".prm-site-link").count() == 0                    # off by default: nothing is shown
+        prm.service.sample_site._sec = 300                                    # (PRM_SAMPLE_SITE_MIN=5)
+        [waiting] = prm.service.store.packets(("pending",))
+        assert prm.service.decide(waiting["id"], "drop")["ok"]
+        page.reload()
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-site-link")
+        assert "不用对图" in block.inner_text() and "不会自动发" in block.inner_text()
+        block.locator("button:has-text('发选款链接')").click()
+        page.wait_for_timeout(1200)
+        assert "已请 Mac 建选款链接" in page.inner_text("body")
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["site_link"]["by"] == "console" and job["text"] == ""
+        line = ("老师，我们把在售的款式放在这个页面了，您看看喜欢哪几款，直接在上面选就可以：\n"
+                "https://xuan.example.test/s/" + "A" * 32)
+        draft = {"intent": "发选款链接（最多选 3 顶，14 天内有效）", "slots": {}, "stage_proposal": "",
+                 "message_kind": "other", "reply_draft": line, "attachments_to_send": [], "needs_attention": False,
+                 "reason": ""}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        # she picked two hats on the site: a round, then her order's draft from the Mac
+        assert prm.service.store.add_creator_link(1, ACCOUNT, source="console")
+        prm.clock.now += 120
+        assert prm.service.sample_site.sweep() is not None
+        job = prm.relay.next_job(0, ("prm",))
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(pull_answer(submission()), ensure_ascii=False)})
+        prm.relay.tick()
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["op"] == "site_order"
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(order_answer(), ensure_ascii=False)})
+        prm.relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="直接在上面选就可以")
+        assert card.locator(".tag", has_text="选款链接").count() == 1
+        assert "这一条：发选款链接" in card.inner_text()
+        order = page.locator(".prm-draft", has_text="您选的款我们收到啦")
+        assert order.locator(".tag", has_text="网站选款").count() == 1
+        assert "这一条：选款网站：她自己选了 2 顶" in order.inner_text()
+        assert order.locator("button:has-text('批准并执行')").is_enabled()
+        assert "Mac 没有对图" not in order.inner_text()
+
     def test_deals_page_asks_for_handcards_and_the_review_page_shows_the_cards(self, page, prm, tmp_path):
         """直播手卡 (PRM_HANDCARDS, 2026-11-09): an opened deal has 「直播手卡」 with her latest sample order's product ticked;
         小美's draft waits, so a click says why not; once it is dropped a click with one more typed product id asks the
@@ -2395,6 +2453,73 @@ class TestPrmPages:
         card.locator("button:has-text('不接')").click()
         page.get_by_text("好的，「测试双达人群」不接了").wait_for()
         assert posted[1:] == [("ignore", {"chat": "test_group_41@chatroom"})]
+
+    def test_boss_groups_card_shows_the_groups_the_bot_took_over_by_choosing_and_moves_them(self, page, prm):
+        """老板拉的群里机器人自己选人 (PRM_BOSS_GROUP_PICK, 2026-11-13): with ``pick`` the card says the bot takes such groups
+        over itself; a group it took over so and nobody confirmed (``picked``) says the deal, whom it hangs on and why,
+        has 「改挂到这位」 on each other member of her side (POST pick) and 「是她的群」 (deal action group_confirm); her
+        deal says so too; the admin's 「接群」 of it (``rehook``) asks 「改挂到谁」 with 「不改」."""
+        now = prm.clock.now
+        picked = {"chat": "test_group_81@chatroom", "name": "测试达人&测试品牌", "size": 5, "deal_id": 1, "call": "测试达人",
+                  "how": "她那边第一个在群里说话的人", "hook": {"wxid": "wxid_test_81a", "name": "测试助理"},
+                  "members": [{"wxid": "wxid_test_81b", "name": "测试达人"}, {"wxid": "wxid_test_81c", "name": "测试运营"}]}
+        bg = {"enabled": True, "why_not": "", "warning": "", "boss": ["老板测试"], "boss_call": "老板", "pending": [],
+              "waiting": 0, "linked": 1, "pick": True, "picked": [picked]}
+        posted = []
+
+        def answer(route):
+            posted.append((route.request.url.rsplit("/", 1)[1], route.request.post_data_json))
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+        def deal_answer(route):
+            if route.request.method == "POST":
+                posted.append(("deals", route.request.post_data_json))
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+            else:
+                route.fallback()
+
+        def state_of(state):
+            state.update(boss_groups=json.loads(json.dumps(bg)))
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01" and p.get("deal"):
+                    p["deal"]["unconfirmed_groups"] = [{"chat": picked["chat"], "name": picked["name"],
+                                                        "picked": picked["how"]}]
+
+        self._serve_prm(page, state_of)
+        page.route("**/api/prm/boss-groups/*", answer)
+        page.route("**/api/prm/deals", deal_answer)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        card.wait_for()
+        assert "机器人自己接手：群名里有其中一个人的名字就挂在这个人身上" in card.inner_text()
+        row = card.locator(".prm-picked-group")
+        text = row.inner_text()
+        for expected in ("测试达人&测试品牌", "5 人", "机器人自己接手的，还没确认",
+                         "合作单「测试达人」挂在「测试助理」身上（她那边第一个在群里说话的人）", "私聊只算挂着的这个人的"):
+            assert expected in text, expected
+        assert row.locator("button:has-text('改挂到这位')").count() == 2
+        row.locator(".prm-boss-member", has_text="测试运营").locator("button:has-text('改挂到这位')").click()
+        page.get_by_text("改好了：「测试达人&测试品牌」的合作单改挂在「测试运营」身上").wait_for()
+        assert posted == [("pick", {"chat": "test_group_81@chatroom", "wxid": "wxid_test_81c"})]
+        row.locator("button:has-text('是她的群')").click()
+        page.get_by_text("记下了：「测试达人&测试品牌」是她的群").wait_for()
+        assert posted[-1] == ("deals", {"deal_id": 1, "action": "group_confirm", "chat": "test_group_81@chatroom"})
+        page.locator("button[aria-label='展开 小美']").click()
+        mine = page.locator(".prm-unconfirmed-group")
+        mine.wait_for()
+        assert "是机器人自己选人接手的老板拉的群（她那边第一个在群里说话的人）" in mine.inner_text()
+        # the admin's 「接群 <群名>」 of it: the same card asks 「改挂到谁」
+        bg.update(picked=[], manual=[{"chat": picked["chat"], "name": picked["name"], "size": 5, "asked_at": now,
+                                      "until": now + 1800, "three_party": False, "rehook": True,
+                                      "members": [{"wxid": "wxid_test_81b", "name": "测试达人", "registered": False,
+                                                   "stopped": False}]}])
+        page.reload()
+        ask = page.locator(".prm-manual-group")
+        ask.wait_for()
+        assert "你在微信里发的「接群」：改挂到谁" in ask.inner_text() and ask.locator("button:has-text('是她')").count() == 0
+        ask.locator("button:has-text('不改')").click()
+        page.get_by_text("好的，「测试达人&测试品牌」不改了").wait_for()
+        assert posted[-1] == ("ignore", {"chat": "test_group_81@chatroom"})
 
     def test_a_held_draft_says_why_and_a_group_the_scan_linked_is_confirmed_on_the_deal(self, page, prm):
         """Review 2026-11-11 #1, #2: a draft that always waits says why on its card by day too (``hold``); a group the

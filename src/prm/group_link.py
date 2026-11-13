@@ -24,7 +24,10 @@ hands the text over, ``admin_command``):
 
 A group the scan found that waits for 「是她」 on the console's 「老板拉的群」 card (PRM_BOSS_GROUPS on, the card's buttons on:
 no ``why_not``) is not asked about here: the answer says to choose there (review 2026-11-09: two questions about one
-group).  「是 N」 counts only the members
+group) and why it waits (2026-11-13, BossGroups ``waiting_why``: PRM_BOSS_GROUP_PICK off, waiting for one of her side to
+speak, a name not known…).  A 老板拉的群 the scan took over by choosing whom its deal hangs on (PRM_BOSS_GROUP_PICK):
+「接群 <群名>」 asks whom to move it to (``_rehook_ask``: 「是 N」 is BossGroups ``rehook``, 「不接」 leaves it).  「是 N」
+counts only the members
 the question listed (MEMBERS_LISTED); more are chosen on the console's card.
 
 群自己接上 (PRM_GROUPS_AUTO_LINK, 2026-11-11, BossGroups ``auto_scan``): the scan links a group by itself when exactly
@@ -46,7 +49,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .boss_groups import LINKED, OFFER_SEC, PENDING
+from .boss_groups import LINKED, OFFER_SEC, PENDING, PICK_HOW
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,14 @@ def _clock_text(at) -> str:
         return time.strftime("%m-%d %H:%M", time.localtime(float(at)))
     except (TypeError, ValueError, OverflowError, OSError):
         return ""
+
+
+def _why_core(why) -> str:
+    """Why a 老板拉的群 waits on the card, without its own pointer to 「是她」 (the answer says where to choose): the text
+    before its last 「：」 when what follows it points at 「是她」."""
+    text = str(why or "").strip()
+    head, sep, tail = text.rpartition("：")
+    return head if sep and head and "点「是她」" in tail else text
 
 
 class GroupLinks:
@@ -165,6 +176,8 @@ class GroupLinks:
         if found is None:
             return NO_READ
         free = [g for g in found if not bg.is_linked(g["chat"])]
+        if not free and len(found) == 1 and bg.picked(found[0]["chat"]):
+            return self._rehook_ask(found[0])  # (老板拉的群里机器人自己选人: 「改挂到谁」)
         if not free and found:
             name = found[0].get("name") or arg
             return f"群「{name}」已经接手了：她在群里说的话会起草；不接了发「不接群 {name}」"
@@ -187,7 +200,10 @@ class GroupLinks:
         if bg.is_linked(chat):
             return f"群「{shown}」已经接手了：她在群里说的话会起草"
         if self._on_card(chat):
-            return f"群「{shown}」是老板拉的群，在控制台「合作单」页顶上的「老板拉的群」卡片里等你选她：到那里点「是她」"
+            # (2026-11-13: the true reason it waits, BossGroups.waiting_why: the pick off, waiting for her side to speak…)
+            why = _why_core(bg.waiting_why(service.store.boss_group(chat)))
+            return (f"群「{shown}」是老板拉的群，还没接手：{why}。要现在接就到控制台「合作单」页顶上的「老板拉的群」卡片里"
+                    "点她的「是她」")
         found = bg.candidates_of(chat)
         deal = service.three_party.deal_of_chat(chat)
         party = service.store.party(int(deal["party_id"])) if deal is not None else None
@@ -221,6 +237,37 @@ class GroupLinks:
             lines.append("群还没有名字：接手以后在微信里给群起个名字，机器人才能把回复发进去")
         return "\n".join(lines)
 
+    def _rehook_ask(self, group: dict) -> str:
+        """「接群 <群名>」 of a 老板拉的群 the scan took over by choosing whom its deal hangs on (PRM_BOSS_GROUP_PICK): whom
+        it hangs on and why, and the others of her side numbered (BossGroups ``rehook_offer``): 「是 N」 moves the deal to
+        that member (``rehook``)."""
+        service = self._service
+        bg, store, chat = service.boss_groups, service.store, str(group["chat"])
+        shown = str(group.get("name") or "") or NO_NAME
+        offer = bg.rehook_offer(chat, str(group.get("name") or ""))
+        row = store.boss_group(chat) or {}
+        party = store.party(int(row.get("party_id") or 0)) if row.get("party_id") else None
+        if offer is None or party is None:
+            return f"群「{shown}」已经接手了；她那边的人现在读不出来，要改挂稍后再发「接群 {shown}」"
+        hook = next((m.get("name") for m in row.get("members") or [] if m.get("wxid") == party["wxid"]), "")
+        hook = hook or _nameless(party["wxid"])
+        how = PICK_HOW.get(str(row.get("picked") or ""), "")
+        unsure = bg.unconfirmed(chat)
+        head = (f"群「{shown}」是机器人自己接手的老板拉的群（{'还没确认' if unsure else '确认过了'}）：合作单「{party['name']}」"
+                f"（{row.get('deal_id')} 号）挂在「{hook}」身上（{how}）")
+        members = offer["members"]
+        if not members:
+            bg.withdraw(chat)
+            return head + "；群里她那边没有别人可以改挂"
+        self._asked = {"at": self._clock(), "chat": chat, "name": shown}
+        lines = [head + f"。改挂到谁？回「是 编号」，「不接」作罢（{OFFER_SEC // 60} 分钟内有效）："]
+        lines += [f"{n}. {m.get('name') or _nameless(m['wxid'])}" for n, m in enumerate(members[:MEMBERS_LISTED], 1)]
+        if len(members) > MEMBERS_LISTED:
+            lines.append(f"人太多，只列了前 {MEMBERS_LISTED} 位")
+        if unsure and group.get("name"):
+            lines.append(f"挂得对的话回「确认接群 {group['name']}」")
+        return "\n".join(lines)
+
     def admin_yes(self, number: int) -> str:
         """「是 N」: the open question's N-th member is her (BossGroups ``link``); one line of what happened."""
         asked = self._asked
@@ -236,6 +283,12 @@ class GroupLinks:
                     if len(offer["members"]) > MEMBERS_LISTED else "")
             return f"没有第 {number} 位：回「是 1」到「是 {len(members)}」，「不接」作罢{more}"
         out = bg.link(asked["chat"], members[number - 1]["wxid"], actor="admin")
+        if offer.get("rehook"):                        # (老板拉的群里机器人自己选人: 「改挂到谁」)
+            if not out.get("ok"):
+                return f"没改挂：{out.get('error') or '出错了'}"
+            self._asked = None
+            return (f"改好了：群「{asked['name']}」的合作单「{out['name']}」改挂在「{out['now'] or '（没有名字）'}」身上，"
+                    f"私聊只算 TA 的；群里她那边的人照旧都起草。这个群也算确认过了")
         if not out.get("ok"):
             return f"没接手：{out.get('error') or '出错了'}"
         self._asked = None
@@ -246,8 +299,12 @@ class GroupLinks:
         asked = self._asked
         if asked is None:
             return "现在没有在等你回答的「接群」"
-        if self._service.boss_groups.offered(asked["chat"]) is None:
+        offer = self._service.boss_groups.offered(asked["chat"])
+        if offer is None:
             return self._not_open(asked)
+        if offer.get("rehook"):                        # (「改挂到谁」 dropped: the deal stays where it hangs)
+            self._service.boss_groups.decline(asked["chat"])
+            return f"好的，不改了：群「{asked['name']}」的合作单还挂在原来的人身上"
         # (``_asked`` stays: a 「是 N」 after it says so; 群自己接上: the scan leaves a group a person refused alone; review
         # 2026-11-11 #6: only the group the admin's own question is about, never one the scan asked about)
         self._service.boss_groups.decline(asked["chat"])
@@ -261,8 +318,9 @@ class GroupLinks:
         bg, store = self._service.boss_groups, self._service.store
         rows = [r for r in store.boss_groups((LINKED,)) if bg.unconfirmed(r["chat"])]
         if name:
+            # (老板拉的群里机器人自己选人: a 老板拉的群 the scan took over by choosing whom it hangs on, too)
             named = [r for r in store.boss_groups((LINKED,)) if bg.is_linked(r["chat"]) and _key(r["name"]) == _key(name)
-                     and r.get("manual") == 2]
+                     and (r.get("manual") == 2 or (r.get("picked") and not r.get("manual")))]
             if not named:
                 return f"没有机器人自动接的、叫「{name}」的群"
             if len(named) > 1:
@@ -279,8 +337,12 @@ class GroupLinks:
         who = party["name"] if party else "她"
         if out.get("already"):
             return f"群「{row['name']}」早就确认过是 {who} 的群了"
-        how = ("之后的草稿和老板拉的群一样照门槛、下班时段、自动模式发" if getattr(self._service, "_linked_groups_auto", False)
-               else "之后的草稿照旧在「待审批」里等你看（「手动接的群也自动发」关着）")
+        if getattr(self._service, "_groups_review", False):
+            how = "之后群里的草稿照旧在「待审批」里等你看（「群里的话都先审」开着）"
+        elif out.get("picked") or getattr(self._service, "_linked_groups_auto", False):
+            how = "之后的草稿和老板拉的群一样照门槛、下班时段、自动模式发"
+        else:
+            how = "之后的草稿照旧在「待审批」里等你看（「手动接的群也自动发」关着）"
         return f"好的：群「{row['name']}」确认是 {who} 的群了，{how}"
 
     def admin_stop(self, name: str) -> str:
@@ -386,7 +448,9 @@ class GroupLinks:
         # (她那边的人, PRM_GROUP_HER_SIDE on, in a group of at most PRM_BOSS_GROUP_MAX: her side's lines are drafted too)
         side = bool(getattr(bg, "her_side_on", False)) and not (isinstance(size, int) and size > bg.max_members)
         who = "她和她那边的人（助理、商务）" if side else "她"
-        if getattr(self._service, "_linked_groups_auto", False):
+        if getattr(self._service, "_groups_review", False):
+            bits = [f"之后{who}在群里说的话会起草，在「待审批」里等你看（「群里的话都先审」开着）"]
+        elif getattr(self._service, "_linked_groups_auto", False):
             bits = [f"之后{who}在群里说的话会起草，和老板拉的群一样照门槛、下班时段、自动模式发（「手动接的群也自动发」开着）；"
                     "接群这一刻她在等的那几句的草稿在「待审批」里等你看"]
         else:

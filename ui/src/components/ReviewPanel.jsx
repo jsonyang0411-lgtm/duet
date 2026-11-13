@@ -519,7 +519,7 @@ function DraftCard({ p, canSend, replyParts = 1, macOnline = true, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<><GroupTag p={p} />{p.wechat_at && <span className="tag cy prm-wechat-tag" title={wechatTitle(p)}>已发到微信</span>}{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.handcards && <span className={`tag ${p.handcards.ok ? 'cy' : 'need'}`} title={p.handcards.ok ? 'Mac 做好的直播手卡附在这份草稿里：看过卡片再发（不会自动发）' : '手卡没做成：草稿里没附手卡，话不能原样发'}>{p.handcards.ok ? '手卡' : '手卡没做成'}</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
+      actions={<><GroupTag p={p} />{p.wechat_at && <span className="tag cy prm-wechat-tag" title={wechatTitle(p)}>已发到微信</span>}{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.site_link && <span className="tag cy" title="运营要的「选款链接」：带链接的一句话，要人看过再发（不会自动发）">选款链接</span>}{p.site_order && <span className="tag cy" title="她在选款网站上自己选的款：编码是我们目录里的，不用对图；批准并执行 = 建单 + 审核">网站选款</span>}{p.handcards && <span className={`tag ${p.handcards.ok ? 'cy' : 'need'}`} title={p.handcards.ok ? 'Mac 做好的直播手卡附在这份草稿里：看过卡片再发（不会自动发）' : '手卡没做成：草稿里没附手卡，话不能原样发'}>{p.handcards.ok ? '手卡' : '手卡没做成'}</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>
@@ -539,7 +539,7 @@ function DraftCard({ p, canSend, replyParts = 1, macOnline = true, onDone }) {
             <button type="button" className="btn sm" disabled={busy} onClick={() => act('redraft')}><ArrowClockwise />重新起草</button>
           </div>
         )}
-        {p.intent && <div><b>{p.opening || p.huopan || p.handcards?.console ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
+        {p.intent && <div><b>{p.opening || p.huopan || p.handcards?.console || p.site_link || p.site_order ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
         {!p.needs_attention && p.reason && <div className="dim"><b>依据：</b>{p.reason}</div>}
         {slots.length > 0 && (
           <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>

@@ -36,7 +36,8 @@
     "suspect_hat_share": 90,
     "female_min": 60,
     "fans_price_min": 100,
-    "low_hat_share": 1
+    "low_hat_share": 1,
+    "single_brand_max": 50
   },
   "weekly_cap": 800,
   "quota_margin": 50,

@@ -117,6 +117,20 @@ FAKE_NODE = textwrap.dedent("""\
         detail = scenario.get("detail", {}).get(a)
         out({"executed": True, "platformWrites": writes, "items": [{"targetId": a, "outcome": outcome, **({"detail": detail} if detail else {})}]},
             code or (0 if outcome == "VERIFIED_SUCCESS" else 1))
+    if args[:2] == ["buyin", "author-portrait"]:
+        if "portrait" not in scenario:        # an older douyin-engineering: its dispatch has no such command
+            sys.stderr.write('[USAGE] unknown command "buyin author-portrait"\\nhint: Commands of buyin: author-invite, author-invite-status\\n')
+            sys.exit(2)
+        code = exits.get("portrait")
+        if code: sys.stderr.write(scenario.get("said", {}).get("portrait", "[RISK] 验证码") + "\\n"); sys.exit(code)
+        ids = [a.split("=", 1)[1] for a in args if a.startswith("--aweme-id=")]
+        with open(os.environ["CREATOR_INVITE_REQUEST_LOG"], "a", encoding="utf-8") as f:   # what the pacing wrapper logs: a search and a read each
+            for _ in range(2 * len(ids)):
+                f.write(json.dumps({"cli": "dy", "method": "GET", "path": "/fake"}) + "\\n")
+        creators = [{"awemeId": a, "found": False} if scenario["portrait"].get(a) is None else {"awemeId": a, "found": True, **scenario["portrait"][a]}
+                    for a in ids]
+        out({"site": "buyin", "command": "author-portrait", "dateType": "30d", "creators": creators,
+             "summary": {"asked": len(ids), "found": sum(1 for c in creators if c["found"])}, "requests": 2 * len(ids), "transport": {"name": "page"}})
     sys.stderr.write("[FAKE] no answer for " + " ".join(args) + "\\n")
     sys.exit(99)
 """)
@@ -575,6 +589,174 @@ def test_plan_checks_status_twenty_at_a_time(env):
     assert len(batches) == 1, "15 wanted: one batch of 20 is enough, the rest is not asked about"
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     assert len(plan["creators"]) == 15 and plan["not_checked"] == 20
+
+
+def portrait(top, ratio, *rest, other=None):
+    """One creator's 品牌集中度 the way ``buyin author-portrait`` answers it (every brand name is made up)."""
+    items = [{"name": top, "ratio": ratio}, *({"name": n, "ratio": r} for n, r in rest)]
+    items.append({"name": "其他", "ratio": round(1 - sum(i["ratio"] for i in items), 4) if other is None else other})
+    return {"brandTop": items, "topBrand": {"name": top, "ratio": ratio}, "categoryTop": [], "secondCategoryTop": [], "thirdCategoryTop": []}
+
+
+ONE_KIND = [("连衣裙", "99%"), ("帽子", "1.0%")]                      # nearly all one kind of goods: the old guess said 「只带一个牌子」
+
+
+def brand_scenario(**over):
+    return scenario(missing=[], status={"dy_b_talking": 2}, creators=[
+        row("dy_b_below", 40000), row("dy_b_at", 41000), row("dy_b_high", 42000),
+        row("dy_b_onecat", 43000, goods=ONE_KIND),                       # one kind of goods, many brands (the user's case, 2026-11-13)
+        row("dy_b_onecat_unknown", 44000, goods=ONE_KIND),               # one kind of goods, the portrait not found
+        row("dy_b_empty", 45000), row("dy_b_other", 46000), row("dy_b_notop", 47000),
+        row("dy_b_kept", 48000), row("dy_b_talking", 49000),
+    ], portrait={
+        "dy_b_below": portrait("测试牌子甲", 0.499, ("测试牌子乙", 0.2)),
+        "dy_b_at": portrait("测试牌子丙", 0.5),
+        "dy_b_high": portrait("测试自家牌", 0.93),
+        "dy_b_onecat": portrait("测试牌子丁", 0.0496, ("测试牌子戊", 0.04)),
+        "dy_b_empty": {"brandTop": [], "topBrand": None},                # the page shows no brands
+        "dy_b_other": {"brandTop": [{"name": "其他", "ratio": 1}], "topBrand": None},
+        "dy_b_notop": {"brandTop": [{"name": "测试牌子己", "ratio": 0.3}, {"name": "其他", "ratio": 0.7}]},   # no topBrand: read from the list
+        "dy_b_kept": portrait("测试牌子庚", 0.8),
+    }, **over)
+
+
+def test_plan_leaves_out_creators_whose_sales_are_mostly_one_brand(env):
+    # the user, 2026-11-13: not the ones 「只卖一个牌子或者是自己牌子」, judged by 百应's 品牌集中度 (not guessed from the goods' kinds)
+    env.scenario(brand_scenario())
+    code, out = plan_now(env, config={"rules": {"keep_ids": ["dy_b_kept"]}})
+    assert code == 0, out
+    calls = env.calls()
+    asked = [c for c in calls if c["args"][:2] == ["buyin", "author-portrait"]]
+    assert len(asked) == 1 and asked[0]["wrapper"] == "paced-dy.mjs", "one call for the batch, paced like every other platform read"
+    args = asked[0]["args"]
+    assert args[-2:] == ["--expect-shop-id=9100000000000001", "--no-open"] and not any(a == "--execute" for a in args)
+    ids = [a.split("=", 1)[1] for a in args if a.startswith("--aweme-id=")]
+    assert set(ids) == {"dy_b_below", "dy_b_at", "dy_b_high", "dy_b_onecat", "dy_b_onecat_unknown", "dy_b_empty", "dy_b_other", "dy_b_notop", "dy_b_kept"}, \
+        "only the ones that passed every other rule and are invitable: not the one whose status is 2"
+    status_at = next(i for i, c in enumerate(calls) if c["args"][:2] == ["buyin", "author-invite-status"])
+    assert calls.index(asked[0]) > status_at, "asked after the status check"
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    by = {c["aweme_id"]: c for c in plan["creators"]}
+    gone = {c["aweme_id"]: c for c in plan["excluded"]}
+    # the edge: 49.9% is kept, 50% is not
+    assert (by["dy_b_below"]["brand_top"], by["dy_b_below"]["brand_top_share"]) == ("测试牌子甲", 49.9) and by["dy_b_below"]["flags"] == []
+    assert by["dy_b_below"]["brand_top5"] == [["测试牌子甲", 49.9], ["测试牌子乙", 20.0], ["其他", 30.1]]
+    assert gone["dy_b_at"]["reason"] == "近 30 天 50% 是同一个牌子（测试牌子丙）：只带一个牌子 / 自己的牌子（品牌集中度 ≥ 50%）"
+    assert gone["dy_b_high"]["reason"] == "近 30 天 93% 是同一个牌子（测试自家牌）：只带一个牌子 / 自己的牌子（品牌集中度 ≥ 50%）"
+    assert gone["dy_b_high"]["group"] == "single_brand" and gone["dy_b_high"]["brand_top_share"] == 93.0
+    # the old guess from the goods' kinds: gone once the brand share is known, kept as the fallback when it is not
+    assert by["dy_b_onecat"]["flags"] == [] and by["dy_b_onecat"]["brand_top_share"] == 5.0
+    assert by["dy_b_onecat_unknown"]["flags"] == ["近 30 天 99% 是连衣裙：可能只带一个牌子，看一眼", "品牌集中度不知道"]
+    # not known (not found, an empty list, only 「其他」): kept, flagged, nothing guessed
+    for who in ("dy_b_onecat_unknown", "dy_b_empty", "dy_b_other"):
+        assert (by[who]["brand_top"], by[who]["brand_top_share"]) == (None, None) and "品牌集中度不知道" in by[who]["flags"], who
+    assert by["dy_b_other"]["brand_top5"] == [["其他", 100.0]] and by["dy_b_empty"]["brand_top5"] == []
+    assert (by["dy_b_notop"]["brand_top"], by["dy_b_notop"]["brand_top_share"]) == ("测试牌子己", 30.0)
+    assert by["dy_b_kept"]["flags"] == ["近 30 天 80% 是同一个牌子（测试牌子庚）：rules.keep_ids 留下的，看一眼"], "keep_ids keeps her, flagged"
+    assert "brand_top" not in gone["dy_b_talking"], "not asked about: her status is not 邀约带货"
+    assert plan["brand"] == {"single_brand_max": 50.0, "missing_command": False, "asked": 9, "known": 6, "excluded": 2, "calls": 1,
+                             "requests": 18, "stopped": None, "failed": None}
+    assert plan["requests"]["dy"] == 18, "the extra requests are in the plan's requests.dy (the fake logs only these)"
+    assert plan["notes"] == [] and "notes" not in out
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    assert "| 粉丝人群 | 最大的牌子 | 主推 / 附带 |" in md and "| 测试牌子甲 49.9% |" in md and "| 测试牌子丁 5% |" in md
+    assert "平台上能邀约的问了 9 位、6 位查到；最大的牌子占 ≥ 50% 的不进清单（2 位，rules.single_brand_max）" in md
+    assert "抖音 18 次（其中查品牌集中度 18 次）" in md
+    own = md.split("## 专门带自己牌子的")[1].split("## 可能骗样品的")[0]
+    assert "近 30 天最大的牌子占 ≥ 50%（品牌集中度）" in own and "dy_b_at" in own and "dy_b_high" in own
+    table = list(csv.reader(io.StringIO(Path(out["files"]["csv"]).read_text(encoding="utf-8-sig"))))
+    assert table[0][12:16] == ["粉丝人群", "最大的牌子", "最大的牌子占比%", "主推"]
+    assert next(r for r in table if "dy_b_below" in r)[13:15] == ["测试牌子甲", "49.9"]
+    assert next(r for r in table if "dy_b_empty" in r)[13:15] == ["", ""]
+    # the spare list shows it too
+    code, out = plan_now(env, count=2)
+    assert code == 0, out
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    assert "| 帽子占比 | 最大的牌子 | 提醒 |" in md.split("## 备选")[1]
+    # what the platform gives is read carefully: a share out of 0–1, a missing name, the rounding of what is shown
+    assert tool.brand_view({"found": True, "topBrand": {"name": "x", "ratio": 1.5}, "brandTop": []})["brand_top"] is None
+    assert tool.brand_view({"found": True, "topBrand": {"name": "", "ratio": 0.6}, "brandTop": []})["brand_top_share"] is None
+    assert tool.brand_view({"found": True, "topBrand": {"name": "a|b\nc", "ratio": 0.4996}})["brand_top"] == "a/b c"
+    assert tool.brand_view({"found": True, "topBrand": {"name": "x", "ratio": 0.4996}})["brand_top_share"] == 50.0, "the shown share is the one compared"
+    assert tool.brand_view({"found": False, "topBrand": {"name": "x", "ratio": 0.9}})["brand_top"] is None
+    assert tool.brand_view(None) == {"brand_top": None, "brand_top_share": None, "brand_top5": []}
+
+
+def test_plan_keeps_creators_whose_brand_concentration_is_not_known(env):
+    many = [row(f"dy_many_{i:02d}", 10000 + i, goods=ONE_KIND if i == 0 else None) for i in range(45)]
+    # an older douyin-engineering (the default fake): said once in the plan, no flag on each creator, the old guess stays
+    env.scenario(scenario(creators=many, missing=[], status={}))
+    code, out = plan_now(env, count=30)
+    assert code == 0, out
+    assert len([c for c in env.calls() if c["args"][:2] == ["buyin", "author-portrait"]]) == 1, "asked once: not again for the second batch"
+    assert len([c for c in env.calls() if c["args"][:2] == ["buyin", "author-invite-status"]]) == 2
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert len(plan["creators"]) == 30 and plan["brand"]["missing_command"] is True and plan["brand"]["asked"] == 0
+    assert all("品牌集中度不知道" not in c["flags"] for c in plan["creators"])
+    assert next(c for c in plan["creators"] + plan["spare"] if c["aweme_id"] == "dy_many_00")["flags"] == ["近 30 天 99% 是连衣裙：可能只带一个牌子，看一眼"]
+    assert len(plan["notes"]) == 1 and plan["notes"][0].startswith("抖音命令行还没有 buyin author-portrait") and out["notes"] == plan["notes"]
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    assert md.count("author-portrait") == 1 and "平台上能邀约的问了" not in md and "其中查品牌集中度" not in md
+    # the command fails: those asked are kept and flagged, it is not asked again, the plan is made
+    env.log.unlink()
+    env.scenario(scenario(creators=many, missing=[], status={}, portrait={}, exits={"portrait": 1}, said={"portrait": "[UPSTREAM] 页面改版了"}))
+    code, out = plan_now(env, count=30)
+    assert code == 0, out
+    assert len([c for c in env.calls() if c["args"][:2] == ["buyin", "author-portrait"]]) == 1
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert len(plan["creators"]) == 30 and all("品牌集中度不知道" in c["flags"] for c in plan["creators"])
+    assert plan["brand"]["failed"] == "查品牌集中度出错（退出码 1：[UPSTREAM] 页面改版了）"
+    assert plan["notes"] == ["查品牌集中度出错（退出码 1：[UPSTREAM] 页面改版了）：后面的不再查，没查到的标「品牌集中度不知道」、照常进清单"]
+    assert "**查品牌集中度出错（退出码 1" in Path(out["files"]["md"]).read_text(encoding="utf-8")
+    # a rate limit: kept and flagged, and no more requests to 抖音 (no next status batch either); the plan is still made
+    env.log.unlink()
+    env.scenario(scenario(creators=many, missing=[], status={}, portrait={}, exits={"portrait": 76}, said={"portrait": "[RISK] 验证码"}))
+    code, out = plan_now(env, count=30)
+    assert code == 0, out
+    dy_calls = [c["args"][:2] for c in env.calls() if c["args"][0] == "buyin"]
+    assert dy_calls == [["buyin", "author-invite-status"], ["buyin", "author-portrait"]], "nothing more asked of 抖音 after the wall"
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert len(plan["creators"]) == 20 and all("品牌集中度不知道" in c["flags"] for c in plan["creators"]) and plan["not_checked"] == 20
+    assert plan["brand"]["stopped"] == "查品牌集中度时平台限流（[RISK] 验证码）" and "不再往下查" in plan["notes"][0]
+    assert "另有 20 位符合条件、还没查平台状态（查品牌集中度时平台限流，没再往下查）" in Path(out["files"]["md"]).read_text(encoding="utf-8")
+    # a lost login stops the plan, as every other read does
+    for exit_code in (77, 79):
+        env.scenario(scenario(creators=many, missing=[], status={}, portrait={}, exits={"portrait": exit_code}))
+        code, _ = plan_now(env, count=30)
+        assert code == exit_code
+    # each batch asked once when it works; the requests are counted
+    env.log.unlink()
+    env.scenario(scenario(creators=many, missing=[], status={}, portrait={f"dy_many_{i:02d}": portrait("测试牌子甲", 0.1) for i in range(45)}))
+    code, out = plan_now(env, count=30)
+    assert code == 0, out
+    asked = [c["args"] for c in env.calls() if c["args"][:2] == ["buyin", "author-portrait"]]
+    assert [len([a for a in x if a.startswith("--aweme-id=")]) for x in asked] == [20, 20]
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert plan["brand"]["calls"] == 2 and plan["brand"]["requests"] == 80 == plan["requests"]["dy"]
+    assert next(c for c in plan["creators"] + plan["spare"] if c["aweme_id"] == "dy_many_00")["flags"] == [], "known and low: the old guess is gone"
+
+
+def test_the_brand_check_can_be_switched_off_and_its_threshold_is_checked(env):
+    env.scenario(brand_scenario())
+    code, out = plan_now(env, config={"rules": {"single_brand_max": 0}})
+    assert code == 0, out
+    assert not any(c["args"][:2] == ["buyin", "author-portrait"] for c in env.calls()), "0: not one request for it"
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    by = {c["aweme_id"]: c for c in plan["creators"]}
+    assert {"dy_b_at", "dy_b_high"} <= set(by) and all("品牌集中度不知道" not in c["flags"] for c in by.values())
+    assert by["dy_b_onecat"]["flags"] == ["近 30 天 99% 是连衣裙：可能只带一个牌子，看一眼"], "as before: the old guess"
+    assert by["dy_b_high"]["brand_top"] is None and plan["notes"] == []
+    assert "- 品牌集中度：没查（rules.single_brand_max 是 0）" in Path(out["files"]["md"]).read_text(encoding="utf-8")
+    # another threshold: 93% is still out at 90, 50% is in
+    code, out = plan_now(env, config={"rules": {"single_brand_max": 90}})
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert "dy_b_at" in {c["aweme_id"] for c in plan["creators"]}
+    assert {c["aweme_id"]: c["reason"] for c in plan["excluded"]}["dy_b_high"].endswith("（品牌集中度 ≥ 90%）")
+    assert tool.load_config(env.write_config())["rules"]["single_brand_max"] == 50.0
+    for bad in (-1, 101, "50", True, None):
+        cfg = env.write_config(rules={"single_brand_max": bad})
+        code, _, _ = env.main(["plan", "--config", cfg, "--out-dir", str(env.tmp / "p"), "--ledger-dir", str(env.tmp / "l")])
+        assert code == 2, bad
 
 
 def test_config_is_checked_before_anything_runs(env):
@@ -1053,3 +1235,9 @@ def test_the_tool_runs_on_the_macs_python_3_9(env):
                           env={**os.environ})
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout)["creators"] == 3
+    env.scenario(brand_scenario())                                      # the 品牌集中度 path too
+    done = subprocess.run(["/usr/bin/python3", str(TOOL), "plan", "--config", cfg, "--count", "20", "--out-dir", str(env.tmp / "p39b"),
+                           "--ledger-dir", str(env.tmp / "l39")], capture_output=True, text=True, timeout=120, env={**os.environ})
+    assert done.returncode == 0, done.stderr
+    plan = json.loads(Path(json.loads(done.stdout)["files"]["json"]).read_text(encoding="utf-8"))
+    assert {c["aweme_id"] for c in plan["excluded"] if c.get("group") == "single_brand"} == {"dy_b_at", "dy_b_high", "dy_b_kept"}

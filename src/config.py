@@ -407,6 +407,17 @@ class BotConfig:
     # console says it cannot be read).  A registered creator's new lines become a 百应 draft in 待审批 that an operator
     # copies and sends in 百应 by hand; the bot never sends it.
     prm_buyin_sync_min: int = 0
+    # 选款网站 (sample_site/, CODEBASE_REFERENCE 功能「选款网站」, 2026-11-13): every PRM_SAMPLE_SITE_MIN minutes (2-1440,
+    # 0 = off, the default) the Mac takes the creators' new submissions from the site and each becomes a sample
+    # order's draft in 待审批 (no photo check: she picked our own codes); 「发选款链接」 / 「选款链接 <达人>」 needs it on too.
+    # PRM_SAMPLE_SITE_AUTO "on" (off by default): such an order whose preview is ready is made (and audited) without a
+    # person's 批准并执行.
+    prm_sample_site_min: int = 0
+    prm_sample_site_auto: str = "off"
+    # A general link's submission whose 抖音号 nobody on the list has: given up (and acked, so the site drops its
+    # receiver) after this many days (1-90).  Such an order is never made by PRM_SAMPLE_SITE_AUTO: the 抖音号 is
+    # whatever the submitter typed.
+    prm_sample_site_unmatched_days: int = 7
     # 加百应达人微信 (src/prm/friend_adds.py, CODEBASE_REFERENCE 功能 R): "on" lets an operator turn the contact a creator
     # left in 百应 into ONE WeChat friend request (the console's 「添加该达人微信」, or the admin's 加达人 N) through the
     # friend manager's add_friend (Windows: the WeChat window), at most prm_friend_add_daily_max a day and
@@ -435,6 +446,13 @@ class BotConfig:
     # "off" (the default): nothing of it.
     prm_boss_groups: str = "off"
     prm_boss_group_max: int = 6
+    # 老板拉的群里机器人自己选人 (src/prm/boss_groups.py ``_pick_pending``, 2026-11-13; the user: 「我是觉得有点多余」): "on"
+    # (with prm_boss_groups and prm_group_her_side on): a 老板拉的群 that waits for 「是她」 only because more than one
+    # person besides us and the boss may be her is taken over by the scan itself: the deal hangs on the one member whose
+    # name the group's name has (exactly one), else on the first of her side to speak there, else it waits until one
+    # speaks; the deal's 称呼 comes from the group's name.  Every draft there (and of that member's private chat) waits
+    # for a person until one confirms; the admin is told once in WeChat.  "off" (the default): the console's 「是她」.
+    prm_boss_group_pick: str = "off"
     # What the Mac is told the boss is called (1-10 characters): the boss's names (PRM_GROUP_WITH) never leave this PC;
     # a group job says this instead (its ``meta.group.boss``, and in the group's name and the lines it is told).
     prm_boss_call: str = "老板"
@@ -464,6 +482,12 @@ class BotConfig:
     # her latest line in private, or none: as before.  Decided when the message is made.  "off" (the default): her private
     # chat when she has one, else the group, as before.
     prm_reach_last_spoke: str = "off"
+    # 群里的话都先审 (PrmService._hand_hold, 2026-11-13; the user: 「群里的消息都经过审批再发…私信依旧可以自动回复」): "on":
+    # nothing goes into a group chat by itself: every draft for a group (a 老板拉的群, one linked by hand or by the scan,
+    # confirmed or not, her own line's or her side's, and what the bot starts itself there: a shipping notice, a 专属佣金
+    # / 专属链接 step, an opening, 补发货盘, 做手卡, 签收后问一句) waits in 待审批 whatever the gates, 下班时段, 自动模式,
+    # 开场白自动发 and prm_linked_groups_auto say.  Private chats as before.  "off" (the default): as before.
+    prm_groups_review: str = "off"
     # 我们自己的人 (src/prm/boss_groups.py, 2026-11-11): the names of our own people (colleagues) in creators' groups, by
     # their names in this account's contacts (their 备注), comma-separated, at most 10 (this PC's .env only, never the
     # repo), resolved as PRM_GROUP_WITH's bosses are: never "who is she" (the scan, 接群, the boss scan), never her side
@@ -692,6 +716,14 @@ def _validate_config(kwargs: dict) -> None:
     buyin_min = int(kwargs.get("prm_buyin_sync_min", 0))
     if not (buyin_min == 0 or 5 <= buyin_min <= 1440):
         errors.append(f"PRM_BUYIN_SYNC_MIN must be 0 (off) or between 5 and 1440, got {kwargs.get('prm_buyin_sync_min')}")
+    site_min = int(kwargs.get("prm_sample_site_min", 0))
+    if not (site_min == 0 or 2 <= site_min <= 1440):
+        errors.append(f"PRM_SAMPLE_SITE_MIN must be 0 (off) or between 2 and 1440, got {kwargs.get('prm_sample_site_min')}")
+    if kwargs.get("prm_sample_site_auto", "off") not in ("off", "on"):
+        errors.append(f"PRM_SAMPLE_SITE_AUTO must be off or on, got {kwargs.get('prm_sample_site_auto')}")
+    if not (1 <= int(kwargs.get("prm_sample_site_unmatched_days", 7)) <= 90):
+        errors.append("PRM_SAMPLE_SITE_UNMATCHED_DAYS must be between 1 and 90, got "
+                      f"{kwargs.get('prm_sample_site_unmatched_days')}")
     friend_add = kwargs.get("prm_friend_add", "off")
     if friend_add not in ("off", "on"):
         errors.append(f"PRM_FRIEND_ADD must be off or on, got {friend_add}")
@@ -721,6 +753,9 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_BOSS_GROUPS must be off or on, got {kwargs.get('prm_boss_groups')}")
     if not (3 <= int(kwargs.get("prm_boss_group_max", 6)) <= 20):
         errors.append(f"PRM_BOSS_GROUP_MAX must be between 3 and 20, got {kwargs.get('prm_boss_group_max')}")
+    # (on without PRM_BOSS_GROUPS or PRM_GROUP_HER_SIDE it only does nothing: the console and 「接群」 say why)
+    if kwargs.get("prm_boss_group_pick", "off") not in ("off", "on"):
+        errors.append(f"PRM_BOSS_GROUP_PICK must be off or on, got {kwargs.get('prm_boss_group_pick')}")
     boss_call = " ".join(str(kwargs.get("prm_boss_call", "老板") or "").split())
     if not 1 <= len(boss_call) <= 10:
         errors.append(f"PRM_BOSS_CALL must be 1 to 10 characters, got {len(boss_call)}")
@@ -738,6 +773,8 @@ def _validate_config(kwargs: dict) -> None:
         errors.append("PRM_GROUP_OURS: each name must be 1-20 characters with a letter, a digit or a Chinese character")
     if kwargs.get("prm_reach_last_spoke", "off") not in ("off", "on"):
         errors.append(f"PRM_REACH_LAST_SPOKE must be off or on, got {kwargs.get('prm_reach_last_spoke')}")
+    if kwargs.get("prm_groups_review", "off") not in ("off", "on"):
+        errors.append(f"PRM_GROUPS_REVIEW must be off or on, got {kwargs.get('prm_groups_review')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -893,6 +930,9 @@ def load_config() -> BotConfig:
         "prm_handcards": _parse_switch(os.getenv("PRM_HANDCARDS", "off")),
         "prm_draft_context": _parse_switch(os.getenv("PRM_DRAFT_CONTEXT", "off")),
         "prm_buyin_sync_min": int(os.getenv("PRM_BUYIN_SYNC_MIN", "0")),
+        "prm_sample_site_min": int(os.getenv("PRM_SAMPLE_SITE_MIN", "0")),
+        "prm_sample_site_auto": _parse_switch(os.getenv("PRM_SAMPLE_SITE_AUTO", "off")),
+        "prm_sample_site_unmatched_days": int(os.getenv("PRM_SAMPLE_SITE_UNMATCHED_DAYS", "7")),
         "prm_friend_add": _parse_switch(os.getenv("PRM_FRIEND_ADD", "off")),
         "prm_friend_add_daily_max": int(os.getenv("PRM_FRIEND_ADD_DAILY_MAX", "10")),
         "prm_friend_add_gap_sec": int(os.getenv("PRM_FRIEND_ADD_GAP_SEC", "120")),
@@ -903,11 +943,13 @@ def load_config() -> BotConfig:
         "prm_group_name": os.getenv("PRM_GROUP_NAME", "").strip() or "{品牌}×{昵称}",
         "prm_boss_groups": _parse_switch(os.getenv("PRM_BOSS_GROUPS", "off")),
         "prm_boss_group_max": int(os.getenv("PRM_BOSS_GROUP_MAX", "6")),
+        "prm_boss_group_pick": _parse_switch(os.getenv("PRM_BOSS_GROUP_PICK", "off")),
         "prm_boss_call": " ".join(os.getenv("PRM_BOSS_CALL", "").split()) or "老板",
         "prm_linked_groups_auto": _parse_switch(os.getenv("PRM_LINKED_GROUPS_AUTO", "off")),
         "prm_groups_auto_link": _parse_switch(os.getenv("PRM_GROUPS_AUTO_LINK", "off")),
         "prm_group_her_side": _parse_switch(os.getenv("PRM_GROUP_HER_SIDE", "off")),
         "prm_reach_last_spoke": _parse_switch(os.getenv("PRM_REACH_LAST_SPOKE", "off")),
+        "prm_groups_review": _parse_switch(os.getenv("PRM_GROUPS_REVIEW", "off")),
         "prm_group_ours": os.getenv("PRM_GROUP_OURS", "").strip(),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),

@@ -219,11 +219,11 @@ class AdvancedPostTests(_TempEnv):
         for key in ("PRM_BOSS_GROUP_MAX", "PRM_BOSS_CALL"):
             self.assertEqual(fields[key]["requires"][0]["key"], "PRM_BOSS_GROUPS")
         prm = next(g for g in groups if g["id"] == "prm")
-        # (after them: PRM_LINKED_GROUPS_AUTO, and 2026-11-11's group switches)
+        # (after them: PRM_BOSS_GROUP_PICK (2026-11-13), PRM_LINKED_GROUPS_AUTO, and 2026-11-11's group switches)
         keys = [f["key"] for f in prm["fields"]]
         at = keys.index("PRM_BOSS_GROUPS")
-        self.assertEqual(keys[at:at + 4], ["PRM_BOSS_GROUPS", "PRM_BOSS_CALL", "PRM_BOSS_GROUP_MAX",
-                                           "PRM_LINKED_GROUPS_AUTO"])
+        self.assertEqual(keys[at:at + 5], ["PRM_BOSS_GROUPS", "PRM_BOSS_CALL", "PRM_BOSS_GROUP_MAX",
+                                           "PRM_BOSS_GROUP_PICK", "PRM_LINKED_GROUPS_AUTO"])
         for key, value in (("PRM_BOSS_GROUP_MAX", "2"), ("PRM_BOSS_GROUP_MAX", "21"), ("PRM_BOSS_GROUPS", "maybe"),
                            ("PRM_BOSS_CALL", "一二三四五六七八九十一")):
             status, body = _request("/api/advanced", "POST", {"values": {key: value}})
@@ -237,13 +237,13 @@ class AdvancedPostTests(_TempEnv):
         """PRM_LINKED_GROUPS_AUTO (接手任何合作群, decision 2026-11-10): an on/off switch after the 老板拉的群 settings, off by
         default (a group linked by hand: its drafts always wait for a person), used with the copilot on, not with
         PRM_BOSS_GROUPS (a link by hand works whatever that says); a bad value is refused on its own field.  (The two
-        switches of 2026-11-11 come after it.)"""
+        switches of 2026-11-11 come after it; PRM_BOSS_GROUP_PICK of 2026-11-13, one of the boss groups', before it.)"""
         from src.web import advanced_config as adv
 
         groups = _request("/api/advanced")[1]["groups"]
         prm = next(g for g in groups if g["id"] == "prm")
         keys = [f["key"] for f in prm["fields"]]
-        field = prm["fields"][keys.index("PRM_BOSS_GROUP_MAX") + 1]
+        field = prm["fields"][keys.index("PRM_BOSS_GROUP_PICK") + 1]
         self.assertEqual((field["key"], field["type"], field["value"]), ("PRM_LINKED_GROUPS_AUTO", "onoff", "off"))
         self.assertEqual(field["requires"][0]["key"], "PRM_COPILOT")
         self.assertIn("一律等你看过再发", field["help"])
@@ -296,6 +296,31 @@ class AdvancedPostTests(_TempEnv):
         self.assertFalse(body["ok"])
         self.assertEqual(list(body["errors"]), ["PRM_GROUP_OURS"], body)
         self.assertEqual(adv.validate_updates({"PRM_GROUP_OURS": "品牌同事,测试运营"}, {}), {})
+
+    def test_boss_group_pick_and_groups_review_are_shown_off_by_default(self):
+        """PRM_BOSS_GROUP_PICK (2026-11-13) right after PRM_BOSS_GROUP_MAX, used with PRM_BOSS_GROUPS and
+        PRM_GROUP_HER_SIDE on; PRM_GROUPS_REVIEW right before PRM_REACH_LAST_SPOKE, used with the copilot on; both off by
+        default, a bad value refused on its own field."""
+        from src.web import advanced_config as adv
+
+        groups = _request("/api/advanced")[1]["groups"]
+        prm = next(g for g in groups if g["id"] == "prm")
+        keys = [f["key"] for f in prm["fields"]]
+        fields = {f["key"]: f for f in prm["fields"]}
+        self.assertEqual(keys.index("PRM_BOSS_GROUP_PICK"), keys.index("PRM_BOSS_GROUP_MAX") + 1)
+        self.assertEqual(keys.index("PRM_GROUPS_REVIEW"), keys.index("PRM_REACH_LAST_SPOKE") - 1)
+        pick, review = fields["PRM_BOSS_GROUP_PICK"], fields["PRM_GROUPS_REVIEW"]
+        self.assertEqual((pick["type"], pick["value"], review["type"], review["value"]), ("onoff", "off", "onoff", "off"))
+        self.assertEqual([r["key"] for r in pick["requires"]], ["PRM_BOSS_GROUPS", "PRM_GROUP_HER_SIDE"])
+        self.assertEqual([r["key"] for r in review["requires"]], ["PRM_COPILOT"])
+        self.assertIn("接群 群名", pick["help"])
+        self.assertIn("私聊照旧自动回复", review["help"])
+        for key in ("PRM_BOSS_GROUP_PICK", "PRM_GROUPS_REVIEW"):
+            status, body = _request("/api/advanced", "POST", {"values": {key: "maybe"}})
+            self.assertFalse(body["ok"])
+            self.assertEqual(list(body["errors"]), [key], body)
+            self.assertEqual(adv.validate_updates({key: "on"}, {}), {})
+            self.assertEqual(adv.normalize(key, "yes"), "on")
 
     def test_reach_last_spoke_is_the_copilots_last_switch_off_by_default(self):
         """PRM_REACH_LAST_SPOKE (2026-11-11): what the bot starts itself goes where her side last spoke; an on/off switch

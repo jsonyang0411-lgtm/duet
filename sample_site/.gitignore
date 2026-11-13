@@ -1,0 +1,7 @@
+data/
+__pycache__/
+*.db
+*.db-wal
+*.db-shm
+site.env
+admin_token*

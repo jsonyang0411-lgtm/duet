@@ -1,0 +1,16 @@
+data/
+tools/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.git
+.gitignore
+Dockerfile
+.dockerignore
+docker-compose*.yml
+Caddyfile*
+site.env
+*.md
+admin_token*
