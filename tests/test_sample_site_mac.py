@@ -197,6 +197,69 @@ def test_a_wrong_key_and_a_site_that_is_away_are_said_as_they_are(site, worker):
     assert site_.SiteClient(site.base, SITE_TOKEN).status()["submissions"] == {"new": 0, "taken": 0, "acked": 0}
 
 
+def _serving(handler):
+    import http.server
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("code", [301, 302, 307, 308])
+def test_the_client_never_follows_a_redirect_so_the_key_goes_nowhere_else(worker, code):  # noqa: F811
+    """Security review 2026-11-13 #9: urllib follows a redirect and sends the request again with its Authorization
+    header, to another host over plain http too.  The client refuses every redirect: the other server hears nothing."""
+    import http.server
+
+    heard = []
+
+    class Elsewhere(http.server.BaseHTTPRequestHandler):
+        def _answer(self):
+            heard.append((self.command, self.path, self.headers.get("Authorization")))
+            body = b'{"ok": true, "submissions": [], "catalog": {}, "links": {}}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        do_GET = do_POST = do_PUT = _answer
+
+        def log_message(self, *args):
+            pass
+
+    other = _serving(Elsewhere)
+
+    class Redirecting(http.server.BaseHTTPRequestHandler):
+        def _answer(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(code)
+            self.send_header("Location", "http://127.0.0.1:%d%s" % (other.server_address[1], self.path))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        do_GET = do_POST = do_PUT = _answer
+
+        def log_message(self, *args):
+            pass
+
+    first = _serving(Redirecting)
+    try:
+        site_ = worker.sample_site
+        client = site_.SiteClient("http://127.0.0.1:%d" % first.server_address[1], SITE_TOKEN, timeout=5)
+        for call in (client.status, lambda: client.pull("main"), lambda: client.ack("main", [1]),
+                     lambda: client.put_image("a" * 32, b"x")):
+            with pytest.raises(site_.SiteError) as e:
+                call()
+            assert e.value.verdict == "refused" and "跳转" in str(e.value)
+        with pytest.raises(site_.SiteError):
+            client.picture("a" * 32)
+        assert site_.fetch_picture("https://127.0.0.1:%d/x.jpg" % first.server_address[1], ("127.0.0.1",), 2) == b""
+        assert heard == []                                                   # nobody else ever saw the key
+    finally:
+        for server in (first, other):
+            server.shutdown()
+            server.server_close()
+
+
 # ── the catalogue ──────────────────────────────────────────────────────────
 
 def test_the_catalogue_is_the_top_sellers_really_in_stock_that_the_shop_sells(mac, worker, site):  # noqa: F811
@@ -379,6 +442,9 @@ def test_from_her_link_to_an_audited_order_with_one_approval_and_no_photo_check(
     assert page.code == 200 and "最多选 3 顶" in page.text and "测试渔夫帽" in page.text and "抖音号" not in page.text
     done = submit(site.creator, f"/s/{token}", ["T1001A-F", "T1002A-M"])
     assert done.code in (200, 303)
+    # (whoever holds the link sees only the phone's last digits and the city, before anybody took it too: review #10)
+    mine = site.creator.get(f"/s/{token}").text
+    assert "尾号 0000 · 浙江省杭州市" in mine and PHONE not in mine and "测试路" not in mine and "小美" not in mine
 
     # 3. a round: the Mac takes it (she can no longer change it), the bot queues its order's job; the round's job
     #    keeps nothing of the receiver
@@ -425,7 +491,12 @@ def test_from_her_link_to_an_audited_order_with_one_approval_and_no_photo_check(
     assert site.admin("GET", "status").json()["submissions"] == {"new": 0, "taken": 0, "acked": 1}
     assert bot.prm.store.site_order(1)["acked"] == 1
     page = site.creator.get(f"/s/{token}").text
-    assert PHONE not in page and "测试路" not in page and "138****0000" in page
+    assert PHONE not in page and "测试路" not in page and "小美" not in page and "西湖区" not in page
+    assert "尾号 0000 · 浙江省杭州市" in page                       # (after the ack: the site itself keeps no more than this)
+    [kept] = [tuple(r) for r in __import__("sqlite3").connect(site.app.config.db_path).execute(
+        "SELECT receiver FROM submissions")]
+    assert json.loads(kept[0]) == {"name": "", "phone": "0000", "province": "浙江省", "city": "杭州市", "district": "",
+                                   "address": ""}
     # and nothing of hers was written to the worker's outbox on the way
     assert not any(PHONE in p.read_text(encoding="utf-8", errors="ignore")
                    for p in (mac.home).rglob("*") if p.is_file() and p.suffix in (".json", ".log", ".txt"))

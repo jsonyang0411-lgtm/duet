@@ -261,6 +261,8 @@ img { border: 0; }
 .btn-ghost { min-height: 38px; padding: 7px 14px; font-size: 14px; background: #fff; border-color: #d9d2c7; }
 .btn-block { display: block; width: 100%; }
 .actions .btn + .btn { margin-top: 10px; }
+.msg-choice { padding-bottom: 20px; }
+.notice-refill { margin-bottom: 16px; padding: 10px 12px; font-size: 13px; }
 .linkbtn {
   background: none;
   border: 0;

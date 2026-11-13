@@ -150,26 +150,37 @@ def check_form(form, catalog, max_items, ask_account):
     return {"items": items, "receiver": receiver, "account": account}, {}, typed
 
 
-def mask_phone(phone):
-    phone = phone or ""
-    if len(phone) >= 7:
-        return phone[:3] + "****" + phone[-4:]
-    return "****"
-
-
-def mask_name(name):
-    name = name or ""
-    return (name[:1] + "＊＊") if name else "＊＊"
+def phone_tail(phone):
+    """The last 4 digits of a phone number ("" when there are none)."""
+    digits = re.sub(r"\D", "", phone or "")
+    return digits[-4:] if len(digits) >= 4 else ""
 
 
 def mask_receiver(receiver):
-    """The remnants kept after ack / retention: no district, no address."""
+    """The remnants kept after ack / retention: province, city and the phone's
+    last 4 digits; no part of the name, no district, no street."""
     receiver = receiver or {}
     return {
-        "name": mask_name(receiver.get("name")),
-        "phone": mask_phone(receiver.get("phone")),
+        "name": "",
+        "phone": phone_tail(receiver.get("phone")),
         "province": receiver.get("province", ""),
         "city": receiver.get("city", ""),
         "district": "",
         "address": "",
     }
+
+
+def receiver_line(receiver):
+    """What the creator's page shows of a receiver, in every state:
+    「尾号 0000 · 浙江省杭州市」 (the city only when it differs from the province)."""
+    receiver = receiver or {}
+    province = receiver.get("province", "")
+    city = receiver.get("city", "")
+    place = province + (city if city and city != province else "")
+    tail = phone_tail(receiver.get("phone"))
+    parts = []
+    if tail:
+        parts.append("尾号 " + tail)
+    if place:
+        parts.append(place)
+    return " · ".join(parts)

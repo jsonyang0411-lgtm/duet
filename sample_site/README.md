@@ -25,7 +25,8 @@ whoever runs the server).
 
 ```bash
 cd sample_site
-SAMPLE_SITE_ADMIN_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))") python3 app.py
+python3 -c "import secrets; print(secrets.token_urlsafe(32))" > /tmp/token && chmod 600 /tmp/token
+SAMPLE_SITE_ADMIN_TOKEN_FILE=/tmp/token python3 app.py
 ```
 
 In-process (tests):
@@ -33,7 +34,7 @@ In-process (tests):
 ```python
 from sample_site.app import create_app
 from sample_site.config import Config
-app = create_app(Config(admin_token="x" * 40, db_path="/tmp/t/site.db"))
+app = create_app(Config(admin_token="any-32+-char-token-with-8+-distinct-chars", db_path="/tmp/t/site.db"))
 ```
 
 Tests: `tests/test_sample_site.py` (WSGI in-process, plus the script on the
@@ -54,3 +55,6 @@ system Python) and `tests/test_sample_site_flow.py` (Playwright, phone viewport)
 Additive fields beyond the contract: `status.time`; links list `ask_account`,
 `max_uses`, `parent_id` (personal links made from a general link carry its
 id); pull `purged` (true when the retention purge already masked it).
+A request body that does not arrive within 10 s (`Config.body_deadline`) is
+answered `408` (`"error": "timeout"`). After ack / purge the stored receiver is
+`{"name": "", "phone": "<last 4 digits>", "province", "city", "district": "", "address": ""}`.

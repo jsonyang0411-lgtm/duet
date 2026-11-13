@@ -143,8 +143,13 @@ def test_the_config_takes_the_two_switches_and_refuses_nonsense(monkeypatch):
     monkeypatch.setenv("PRM_SAMPLE_SITE_AUTO", "on")
     cfg = load_config()
     assert cfg.prm_sample_site_min == 5 and cfg.prm_sample_site_auto == "on"
+    assert cfg.prm_sample_site_unmatched_days == 7
     monkeypatch.setenv("PRM_SAMPLE_SITE_MIN", "1")
     with pytest.raises(Exception, match="PRM_SAMPLE_SITE_MIN"):
+        load_config()
+    monkeypatch.setenv("PRM_SAMPLE_SITE_MIN", "5")
+    monkeypatch.setenv("PRM_SAMPLE_SITE_UNMATCHED_DAYS", "0")
+    with pytest.raises(Exception, match="PRM_SAMPLE_SITE_UNMATCHED_DAYS"):
         load_config()
 
 
@@ -388,25 +393,112 @@ def test_a_lost_mac_fails_the_try_and_the_site_still_has_it(bot):
     assert order_job(bot)["meta"]["site_order"]["id"] == 7
 
 
-def test_a_general_links_submission_goes_to_the_creator_known_by_that_account(bot):
+def general(site_id=9, account=ACCOUNT, **over):
+    """A submission that came by a general link: whoever held the link typed the 抖音号."""
+    return submission(site_id, ref="general", kind="general", account=account, **over)
+
+
+def test_a_general_links_submission_goes_to_the_creator_known_by_that_account_and_always_needs_a_person(bot):
+    """Security review 2026-11-13 #1: the 抖音号 of a general link's submission is whatever the submitter typed (anyone
+    holding the link can type a creator's public one and their own address).  Its draft goes to her deal, needs a
+    person and says so plainly on the card and on the deal; a link of her own (same hats, same Mac answer) does not."""
     link_her(bot)
-    round_(bot, submission(9, ref="general", kind="general", account=ACCOUNT.upper()))
+    round_(bot, general(account=ACCOUNT.upper()))
     job = order_job(bot)
     assert job["meta"]["party_id"] == party(bot)["id"] and job["meta"]["site_order"]["account"] == ACCOUNT.upper()
+    bot.finish(job["id"], order_answer(9))
+    packet = bot.prm.store.packet(bot.prm.store.site_order(9)["packet_id"])
+    assert packet["status"] == PENDING and packet["needs_attention"] == 1
+    assert packet["reason"].startswith(sample_site.GENERAL_NOTE) and "没核实" in packet["reason"]
+    assert packet["meta"]["site_order"] == {"id": 9, "hats": 2, "photo_check": False, "unverified": True}
+    notices = " ".join(n["text"] for n in bot.prm.store.deal(deal_id(bot))["notices"])
+    assert "通用链接来的提交" in notices and "先在私聊和她确认收货信息" in notices
+    shown = [p for p in snapshot(bot.prm.store, running=True)["pending"] if p["id"] == packet["id"]]
+    assert shown[0]["site_order"]["unverified"] is True and shown[0]["needs_attention"]
+    assert bot.prm.decide(packet["id"], "execute")["ok"]             # a person who checked may still approve it
 
 
-def test_nobody_on_the_list_waits_and_the_admin_hears_once(bot):
-    sub = submission(9, ref="general", kind="general", account="somebody_else")
-    round_(bot, sub)
+def test_a_link_of_her_own_is_not_flagged_as_unverified(bot):
+    packet = drafted(bot)
+    assert packet["needs_attention"] == 0 and sample_site.GENERAL_NOTE not in packet["reason"]
+    assert "unverified" not in packet["meta"]["site_order"]
+
+
+def test_the_auto_switch_never_makes_a_general_links_order(clock, tmp_path):
+    """PRM_SAMPLE_SITE_AUTO on, the preview ready: a general link's order still waits for a person (review #1: with the
+    switch on, a stranger's submission in a creator's name was made and audited by itself)."""
+    b = make(clock, tmp_path, prm_sample_site_auto="on")
+    try:
+        link_her(b)
+        round_(b, general())
+        job = order_job(b)
+        b.finish(job["id"], order_answer(9))
+        packet = b.prm.store.packet(b.prm.store.site_order(9)["packet_id"])
+        assert packet["status"] == PENDING and packet["needs_attention"] == 1
+        assert b.relay.next_job(0, ("prm",)) is None                  # nothing was sent to be executed
+        assert b.prm.store.events(deal_id(b), kinds=("site_auto",)) == []
+    finally:
+        b.prm.stop()
+        b.relay.stop()
+
+
+def admin_lines(b):
+    return [text for chat, text in b.texts if chat == ADMIN]
+
+
+def test_nobody_on_the_list_waits_quietly_and_the_admin_gets_one_digest(bot, clock):
+    """Review 2026-11-13 #5: fake submissions by a general link must not ring the admin's phone each, nor carry what
+    was typed there: one line for all of them at most every DIGEST_SEC, with at most three short 抖音号."""
+    subs = [general(20 + n, account=f"stranger_{n:02d}" + "x" * 27) for n in range(5)]
+    round_(bot, *subs)
     assert bot.relay.next_job(0, ("prm",)) is None
-    row = bot.prm.store.site_order(9)
-    assert row["state"] == "unmatched" and row["account"] == "somebody_else" and row["party_id"] is None
-    assert bot.prm.sample_site.status()["unmatched"][0]["account"] == "somebody_else"
-    job = round_(bot, sub)
-    assert job["meta"]["acks"] == []                                  # it stays on the site until somebody is found
-    link_her(bot, "somebody_else")                                    # an operator links the account to her
+    row = bot.prm.store.site_order(20)
+    assert row["state"] == "unmatched" and row["party_id"] is None and row["told"] == 1
+    assert len(bot.prm.sample_site.status()["unmatched"]) == 5
+    [line] = admin_lines(bot)
+    assert "有 5 份提交在名单里没找到人" in line and "没核实" in line and "7 天没对上的自动放弃" in line
+    named = line.split("填的抖音号：")[1].split("）")[0]
+    assert named.endswith(" 等") and len(named.replace(" 等", "").split("、")) == sample_site.DIGEST_NAMED
+    assert all(len(name) <= sample_site.DIGEST_CHARS for name in named.replace(" 等", "").split("、"))
+    for private in (PHONE, "测试路", "小美"):
+        assert private not in line                                    # nothing else of what was typed
+    job = round_(bot, *subs, general(30, account="one_more"))
+    assert job["meta"]["acks"] == [] and len(admin_lines(bot)) == 1   # the same ones again, a new one: no second line
+    clock.now += sample_site.DIGEST_SEC
+    round_(bot, *subs, general(30, account="one_more"))
+    assert len(admin_lines(bot)) == 2 and "有 1 份提交" in admin_lines(bot)[1] and "one_more" in admin_lines(bot)[1]
+    link_her(bot, "one_more")                                         # an operator links that account to her
+    round_(bot, general(30, account="one_more"))
+    assert order_job(bot)["meta"]["site_order"]["id"] == 30
+
+
+def test_a_submission_nobody_claimed_is_given_up_and_acked_after_a_week(bot, clock):
+    """... and does not stay on the site in full for 90 days: after PRM_SAMPLE_SITE_UNMATCHED_DAYS it is acked (the
+    site then keeps only remnants)."""
+    sub = general(9, account="somebody_else")
     round_(bot, sub)
-    assert order_job(bot)["meta"]["site_order"]["id"] == 9
+    clock.now += 6 * 86400
+    assert round_(bot, sub)["meta"]["acks"] == [] and bot.prm.store.site_order(9)["state"] == "unmatched"
+    clock.now += 86400
+    round_(bot, sub)
+    row = bot.prm.store.site_order(9)
+    assert row["state"] == "dropped" and row["why"] == sample_site.GIVEN_UP and row["party_id"] is None
+    assert round_(bot, sub, acked=[9])["meta"]["acks"] == [9]
+    assert bot.prm.store.site_order(9)["acked"] == 1 and bot.relay.next_job(0, ("prm",)) is None
+    assert round_(bot)["meta"]["acks"] == []
+
+
+def test_the_days_before_giving_up_can_be_set(clock, tmp_path):
+    b = make(clock, tmp_path, prm_sample_site_unmatched_days=2)
+    try:
+        sub = general(9, account="somebody_else")
+        round_(b, sub)
+        clock.now += 2 * 86400
+        round_(b, sub)
+        assert b.prm.store.site_order(9)["state"] == "dropped"
+    finally:
+        b.prm.stop()
+        b.relay.stop()
 
 
 def test_a_link_of_a_creator_whose_account_is_not_known_is_not_guessed(bot):

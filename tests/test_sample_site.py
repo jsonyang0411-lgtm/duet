@@ -35,6 +35,8 @@ from sample_site_fakes import (TOKEN, Client, checked_picks, details, fake_catal
 
 SITE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sample_site")
 DAY = 86400.0
+RECEIVER_SHOWN = "尾号 0000 · 浙江省杭州市"  # what her page shows of the fake receiver, in every state
+INTERNET = "8.8.4.4"  # a public peer (Python counts the TEST-NET ranges as private)
 CSP = ("default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; "
        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 
@@ -259,9 +261,12 @@ def test_admin_failures_are_rate_limited_per_ip(make_app):
     client = Client(make_app(rate_admin_fail=(3, 60)))
     for _ in range(3):
         assert client.api("GET", "status", token="w" * 40).code == 401
-    blocked = client.api("GET", "status")
+    blocked = client.api("GET", "status", token="w" * 40)
     assert blocked.code == 429 and blocked.json()["error"] == "rate_limited"
-    assert client.api("GET", "status", ip="198.51.100.9").code == 200
+    # the right token is never locked out by somebody's failures from the same address
+    assert client.api("GET", "status").code == 200
+    assert client.api("GET", "status", token="w" * 40).code == 429
+    assert client.api("GET", "status", token="w" * 40, ip="198.51.100.9").code == 401
 
 
 # -- images --------------------------------------------------------------------
@@ -417,10 +422,13 @@ def test_link_url_uses_public_url(make_app):
 
 
 def test_link_url_behind_trusted_proxy(make_app):
-    client = Client(make_app(trust_proxy=True))
-    resp = client.api("POST", "links", {"ref": "deal:9"},
-                      headers={"X-Forwarded-Proto": "https", "X-Forwarded-Host": "xuan.example.org"})
+    client = Client(make_app(trust_proxy=True), ip="10.0.0.2")
+    forwarded = {"X-Forwarded-Proto": "https", "X-Forwarded-Host": "xuan.example.org"}
+    resp = client.api("POST", "links", {"ref": "deal:9"}, headers=forwarded)
     assert resp.json()["url"].startswith("https://xuan.example.org/s/")
+    # the same headers from a peer on the internet are not believed
+    resp = client.api("POST", "links", {"ref": "deal:9"}, headers=forwarded, ip=INTERNET)
+    assert resp.json()["url"].startswith("http://xuan.example.test/s/")
 
 
 @pytest.mark.parametrize("body", [
@@ -490,7 +498,9 @@ def test_full_personal_flow(shop):
     summary = shop.get(path)
     stext = visible_text(summary.text)
     assert "已收到您的选款，谢谢老师～" in stext
-    assert "138****0000" in stext and "13800000000" not in summary.text
+    assert RECEIVER_SHOWN in stext and "13800000000" not in summary.text
+    for private in ("小美", "西湖区", "测试路"):
+        assert private not in summary.text, private
     assert "修改" in stext and path + "?edit=1" in summary.text
     assert shop.api("GET", "status").json()["submissions"] == {"new": 1, "taken": 0, "acked": 0}
 
@@ -593,8 +603,12 @@ def test_edit_before_taken_replaces_the_submission(shop):
     submit(shop, path, ["T1001A-F", "T1002B-M"])
     edit = shop.get(path + "?edit=1")
     assert sorted(checked_picks(edit.text)) == ["T1001A-F", "T1002B-M"]
-    assert 'value="小美"' in edit.text and 'value="13800000000"' in edit.text
+    assert 'value="小美"' in edit.text and 'value="西湖区"' in edit.text and 'value="杭州市"' in edit.text
     assert '<option value="浙江省" selected>' in edit.text
+    # phone and street address are typed again (the link may have been forwarded)
+    assert "13800000000" not in edit.text and "测试路" not in edit.text
+    assert 'name="phone" type="tel" value=""' in edit.text and 'name="address" type="text" value=""' in edit.text
+    assert "为了保护您的信息，手机号和详细地址请再填一次" in visible_text(edit.text)
     assert "款式有更新" not in edit.text
     assert submit(shop, path, ["T1003A-F"], name="小美美").code == 303
     subs = pull(shop)
@@ -655,10 +669,12 @@ def test_pull_returns_unacked_and_ack_masks(shop, clock):
     assert shop.api("POST", "submissions/ack", {"owner": "other", "ids": [ids[1]]}).json()["unknown"] == [ids[1]]
     assert [s["id"] for s in pull(shop)] == [ids[1]]
     receiver = json.loads(db_rows(shop.app, "SELECT receiver FROM submissions WHERE id=?", (ids[0],))[0][0])
-    assert receiver == {"name": "小＊＊", "phone": "138****0000", "province": "浙江省", "city": "杭州市",
+    assert receiver == {"name": "", "phone": "0000", "province": "浙江省", "city": "杭州市",
                         "district": "", "address": ""}
     page = shop.get(p1)
-    assert "小＊＊" in page.text and "测试路" not in page.text and "西湖区" not in page.text
+    assert RECEIVER_SHOWN in visible_text(page.text)
+    for private in ("小美", "13800000000", "测试路", "西湖区"):
+        assert private not in page.text, private
     assert shop.api("GET", "status").json()["submissions"] == {"new": 0, "taken": 1, "acked": 1}
     bad = shop.api("POST", "submissions/ack", {"owner": "main", "ids": ["1"]})
     assert bad.code == 400
@@ -695,12 +711,15 @@ def test_general_link_flow(shop):
     cookie = done.header("Set-Cookie")
     assert cookie.startswith("sg%d=" % general["id"])
     assert "HttpOnly" in cookie and "SameSite=Lax" in cookie and "Path=/g/" in cookie
-    assert "Secure" not in cookie
+    assert "Secure" in cookie  # not a loopback host
     mine = shop.get(child_path)
     text = visible_text(mine.text)
-    assert "已收到您的选款，谢谢老师～" in text and "请收藏这个页面" in text and "xiaomei.test" in text
-    again = shop.get(gpath)
-    assert again.code == 303 and again.header("Location") == child_path
+    assert "已收到您的选款，谢谢老师～" in text and "请收藏这个页面" in text
+    assert RECEIVER_SHOWN in text and "xiaomei.test" not in mine.text
+    again = shop.get(gpath)  # same browser: a choice, never an automatic redirect
+    assert again.code == 200 and again.header("Location") is None
+    assert 'href="%s"' % child_path in again.text and 'href="%s?new=1"' % gpath in again.text
+    assert "查看刚才的提交" in again.text and "替另一位老师填写" in again.text
     stranger = Client(shop.app, ip="198.51.100.20")
     assert stranger.get(gpath).code == 200  # another browser gets the pick page
     subs = pull(shop)
@@ -717,9 +736,15 @@ def test_general_link_double_submit_one_personal_link(shop):
     confirm = review(shop, gpath, ["T1001A-F"], account="xiaomei.test")
     form = hidden_fields(confirm.text) + [("action", "submit")]
     a = shop.post_form(gpath, form)
+    assert a.code == 303
+    b = shop.post_form(gpath, form)  # double tap in the same browser
     shop.cookies.clear()
-    b = shop.post_form(gpath, form)
-    assert a.code == b.code == 303 and a.header("Location") == b.header("Location")
+    c = shop.post_form(gpath, form)  # or a replay without the cookie
+    for again in (b, c):
+        assert again.code == 200 and again.header("Location") is None
+        assert again.header("Set-Cookie") is None
+        assert a.header("Location")[3:] not in again.text  # no link to her page
+        assert "已收到您的选款" in again.text
     assert db_rows(shop.app, "SELECT COUNT(*) FROM submissions")[0][0] == 1
 
 
@@ -732,7 +757,8 @@ def test_general_link_cap_and_secure_cookie(make_app):
     other = Client(client.app, ip="198.51.100.30")
     full = other.get(gpath)
     assert full.code == 404 and "这个链接已经失效了" in full.text
-    assert client.get(gpath).code == 303  # the first creator still reaches her page
+    mine = client.get(gpath)  # the first creator still reaches her page
+    assert mine.code == 200 and 'href="%s"' % done.header("Location") in mine.text
 
 
 def test_invalid_links_look_the_same(shop, clock):
@@ -867,8 +893,21 @@ def test_forbidden_words_in_every_creator_text(shop, clock, make_app):
     rendered["stale"] = shop.get(path + "?edit=1")
     gen = path_of(new_link(shop, kind="general", ref="g:1"))
     rendered["general"] = shop.get(gen)
-    child = submit(shop, gen, ["T1002A-M"], account="xiaomei.test").header("Location")
+    gconfirm = review(shop, gen, ["T1002A-M"], account="xiaomei.test")
+    gform = hidden_fields(gconfirm.text) + [("action", "submit")]
+    child = shop.post_form(gen, gform).header("Location")
     rendered["child"] = shop.get(child)
+    rendered["choice"] = shop.get(gen)
+    rendered["duplicate"] = shop.post_form(gen, gform)
+    rendered["refill"] = shop.get(child + "?edit=1")
+    capped = Client(make_app(db_path=os.path.join(os.path.dirname(shop.app.config.db_path), "d.db"),
+                             general_per_client=(0, 60)))
+    upload_fake_catalogue(capped)
+    rendered["per_client"] = review(capped, path_of(new_link(capped, kind="general")), ["T1001A-F"])
+    slow = Client(make_app(db_path=os.path.join(os.path.dirname(shop.app.config.db_path), "e.db")))
+    slow_path = path_of(new_link(slow))
+    slow.app.config.body_deadline = 0.0
+    rendered["slow"] = slow.post_form(slow_path, [("action", "review")])
     ids = [s["id"] for s in pull(shop)]
     rendered["locked"] = shop.get(path)
     shop.api("POST", "submissions/ack", {"owner": "main", "ids": ids})
@@ -882,6 +921,11 @@ def test_forbidden_words_in_every_creator_text(shop, clock, make_app):
                                        content_type="application/x-www-form-urlencoded")
     empty = Client(make_app(db_path=os.path.join(os.path.dirname(shop.app.config.db_path), "c.db")))
     rendered["empty"] = empty.get(path_of(new_link(empty)))
+    expected = {"choice": (200, "替另一位老师填写"), "duplicate": (200, "已收到您的选款"),
+                "refill": (200, "请再填一次"), "per_client": (429, "提交的次数有点多了"),
+                "slow": (408, "网络有点慢")}
+    for name, (code, words) in expected.items():
+        assert rendered[name].code == code and words in visible_text(rendered[name].text), name
     for name, resp in rendered.items():
         text = visible_text(resp.text)
         assert text.strip(), name
@@ -907,7 +951,9 @@ def test_hostile_input_is_escaped(shop):
     assert "<script>alert" not in confirm.text and "&lt;script&gt;" in confirm.text
     shop.post_form(path, hidden_fields(confirm.text) + [("action", "submit")])
     summary = shop.get(path)
-    assert "<script>alert" not in summary.text and "&lt;script&gt;" in summary.text
+    assert "<script>alert" not in summary.text
+    edit = shop.get(path + "?edit=1")  # the name is filled in again, escaped
+    assert "<script>alert" not in edit.text and "&lt;script&gt;" in edit.text
     errors = review(shop, path, ["T1001A-F"], phone='"><b>1</b>')
     assert '"><b>1</b>' not in errors.text
 
@@ -1081,3 +1127,313 @@ def test_app_py_runs_from_any_folder_name(tmp_path, python):
             if proc.poll() is None:
                 proc.kill()
     assert proc.returncode == 0
+
+
+# -- security review 2026-11-13 ---------------------------------------------------
+
+
+def test_placeholder_and_junk_tokens_are_refused():
+    example = os.path.join(SITE_DIR, "site.env.example")
+    with open(example, encoding="utf-8") as fh:
+        lines = [line.strip() for line in fh if line.strip().startswith("SAMPLE_SITE_ADMIN_TOKEN")]
+    shipped = dict(line.split("=", 1) for line in lines)
+    assert shipped.get("SAMPLE_SITE_ADMIN_TOKEN", "") == ""  # shipped empty
+    with pytest.raises(ConfigError):
+        Config.from_env({"SAMPLE_SITE_ADMIN_TOKEN": shipped.get("SAMPLE_SITE_ADMIN_TOKEN", "")})
+    for bad in ("put-a-long-random-token-here-at-least-32-characters", "x" * 40, "ab" * 20,
+                "abcabcabcabcabcabcabcabcabcabcabcabc", "abcdefg" * 6):
+        with pytest.raises(ConfigError):
+            Config.from_env({"SAMPLE_SITE_ADMIN_TOKEN": bad})
+    assert Config.from_env({"SAMPLE_SITE_ADMIN_TOKEN": "abcdefgh" * 5}).admin_token == "abcdefgh" * 5
+
+
+def _db_files(app):
+    folder = os.path.dirname(app.config.db_path)
+    return {name: open(os.path.join(folder, name), "rb").read() for name in os.listdir(folder)
+            if name.startswith(os.path.basename(app.config.db_path))}
+
+
+SECRET_RECEIVER = dict(name="甄测试", phone="13912345678", district="滨江区", address="测试大道 999 号")
+
+
+def _assert_gone(app, label):
+    for name, data in _db_files(app).items():
+        for value in ("甄测试", "13912345678", "测试大道 999 号", "滨江区", "xiaomei.private"):
+            assert value.encode("utf-8") not in data, "%s: %r still in %s" % (label, value, name)
+
+
+@pytest.mark.parametrize("linux_default", [False, True], ids=["as-opened", "journal_size_limit=-1"])
+def test_ack_leaves_no_receiver_in_the_db_files(shop, linux_default):
+    conn = shop.app.store._conn
+    assert conn.execute("PRAGMA journal_size_limit").fetchone()[0] == 0
+    assert conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+    if linux_default:  # what stock SQLite on Linux would use without our pragma
+        conn.execute("PRAGMA journal_size_limit=-1")
+    path = path_of(new_link(shop, ask_account=True))
+    submit(shop, path, ["T1001A-F"], account="xiaomei.private", **SECRET_RECEIVER)
+    submit(shop, path, ["T1003A-F"], account="xiaomei.private", **SECRET_RECEIVER)  # rev 2
+    files = _db_files(shop.app)
+    assert any(b"13912345678" in data for data in files.values())  # it is there before ack
+    ids = [s["id"] for s in pull(shop)]
+    shop.api("POST", "submissions/ack", {"owner": "main", "ids": ids})
+    _assert_gone(shop.app, "after ack")
+
+
+def test_retention_purge_leaves_no_receiver_in_the_db_files(shop, clock):
+    path = path_of(new_link(shop, ask_account=True))
+    submit(shop, path, ["T1001A-F"], account="xiaomei.private", **SECRET_RECEIVER)
+    clock.now += 91 * DAY
+    shop.get("/healthz")
+    _assert_gone(shop.app, "after purge")
+    receiver = json.loads(db_rows(shop.app, "SELECT receiver FROM submissions")[0][0])
+    assert receiver == {"name": "", "phone": "5678", "province": "浙江省", "city": "杭州市",
+                        "district": "", "address": ""}
+
+
+class SlowInput(object):
+    """A request body that arrives one byte at a time."""
+
+    def __init__(self, data, pause):
+        self.data = data
+        self.pause = pause
+
+    def read1(self, n):
+        time.sleep(self.pause)
+        chunk, self.data = self.data[:1], self.data[1:]
+        return chunk
+
+    read = read1
+
+
+def test_slow_body_gets_408(make_app):
+    app = make_app(body_deadline=0.4)
+    client = Client(app)
+    upload_fake_catalogue(client)
+    path = path_of(new_link(client))
+    body = b"action=review&pick=T1001A-F"
+    import io as _io
+    real = _io.BytesIO
+    started = time.monotonic()
+    try:
+        _io.BytesIO = lambda data=b"": SlowInput(data, 0.1)
+        resp = client.request("POST", path, body=body, content_type="application/x-www-form-urlencoded")
+        admin = client.request("POST", "/admin/api/links", body=b'{"ref": "deal:2"}',
+                               headers={"Authorization": "Bearer " + TOKEN}, content_type="application/json")
+    finally:
+        _io.BytesIO = real
+    assert time.monotonic() - started < 3
+    assert resp.code == 408 and "网络有点慢" in resp.text
+    assert admin.code == 408 and admin.json()["error"] == "timeout"
+
+
+def test_slow_body_cannot_hold_a_server_thread(make_app):
+    app = make_app(body_deadline=1.0)
+    server = make_wsgi_server(app, "127.0.0.1", 0)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True).start()
+    try:
+        slow = socket.create_connection(("127.0.0.1", port), timeout=10)
+        slow.sendall(b"POST /admin/api/links HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     b"Authorization: Bearer " + TOKEN.encode() + b"\r\nContent-Length: 1000\r\n\r\n{")
+        started = time.monotonic()
+        answer = b""
+        for _ in range(40):  # a byte every 0.2 s: each read is quick, the whole body is not
+            try:
+                slow.sendall(b" ")
+            except OSError:
+                break
+            slow.settimeout(0.2)
+            try:
+                answer += slow.recv(4096)
+            except socket.timeout:
+                continue
+            if answer:
+                break
+        took = time.monotonic() - started
+        assert answer.startswith(b"HTTP/1.0 408") or answer.startswith(b"HTTP/1.1 408"), answer[:60]
+        assert took < 4, took
+        slow.close()
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/healthz")
+        assert conn.getresponse().read() == b"ok"
+        conn.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_general_link_cap_per_client(make_app):
+    client = Client(make_app(general_per_client=(2, 86400)))
+    upload_fake_catalogue(client)
+    gpath = path_of(new_link(client, kind="general", max_uses=50))
+    for i in range(2):
+        client.cookies.clear()
+        assert submit(client, gpath, ["T1001A-F"], account="fake_creator_%d" % i).code == 303
+    client.cookies.clear()
+    capped = review(client, gpath, ["T1001A-F"], account="fake_creator_9")
+    assert capped.code == 429 and "提交的次数有点多了" in capped.text
+    assert db_rows(client.app, "SELECT COUNT(*) FROM submissions")[0][0] == 2
+    other = Client(client.app, ip="198.51.100.77")
+    assert submit(other, gpath, ["T1001A-F"], account="fake_creator_10").code == 303
+
+
+def test_revoking_a_general_link_kills_its_personal_links(shop):
+    general = new_link(shop, kind="general", ref="group:2")
+    child = submit(shop, path_of(general), ["T1001A-F"], account="xiaomei.test").header("Location")
+    assert shop.get(child).code == 200
+    shop.api("POST", "links/%d/revoke" % general["id"])
+    dead = shop.get(child)
+    assert dead.code == 404 and "这个链接已经失效了" in dead.text
+    assert dead.body == shop.get("/s/" + "C" * 32).body
+    assert shop.post_form(child, [("action", "review")]).code == 404
+    subs = pull(shop)  # what she sent is still ours to pull
+    assert len(subs) == 1 and subs[0]["kind"] == "general"
+
+
+def test_replayed_general_form_never_hands_out_her_page(shop):
+    gpath = path_of(new_link(shop, kind="general", ref="group:3"))
+    alice = Client(shop.app, ip="198.51.100.10")
+    confirm = review(alice, gpath, ["T1001A-F"], account="fake_alice_01", name="甲某")
+    form = hidden_fields(confirm.text) + [("action", "submit")]
+    first = alice.post_form(gpath, form)
+    alice_page = first.header("Location")
+    mallory = Client(shop.app, ip="198.51.100.66")
+    replay = mallory.post_form(gpath, form)
+    assert replay.code == 200 and replay.header("Location") is None and replay.header("Set-Cookie") is None
+    assert alice_page[3:] not in replay.text and "甲某" not in replay.text
+    assert "已收到您的选款" in replay.text and not mallory.cookies
+    # an edit of her personal page does not reopen the general form's nonce
+    submit(shop, alice_page, ["T1003A-F"], account="fake_alice_01")
+    again = mallory.post_form(gpath, form)
+    assert again.code == 200 and again.header("Location") is None
+    assert db_rows(shop.app, "SELECT COUNT(*) FROM links WHERE parent_id IS NOT NULL")[0][0] == 1
+
+
+def test_one_phone_can_fill_in_for_another_creator(shop):
+    gpath = path_of(new_link(shop, kind="general", ref="group:4"))
+    phone = Client(shop.app, ip="198.51.100.11")
+    first = submit(phone, gpath, ["T1001A-F"], account="fake_first_01").header("Location")
+    choice = phone.get(gpath)
+    assert choice.code == 200 and 'href="%s"' % first in choice.text
+    fresh = phone.get(gpath + "?new=1")
+    assert fresh.code == 200 and 'id="pickform"' in fresh.text and 'id="f-account"' in fresh.text
+    second = submit(phone, gpath, ["T1002A-M"], account="fake_second_02", name="乙某").header("Location")
+    assert second.startswith("/s/") and second != first
+    assert 'href="%s"' % second in phone.get(gpath).text  # the newest one is offered
+    subs = pull(shop)
+    assert sorted(s["account"] for s in subs) == ["fake_first_01", "fake_second_02"]
+
+
+def test_personal_tokens_of_general_links_are_random(shop):
+    from sample_site.security import Signer
+    assert not hasattr(Signer, "child_token")
+    gpath = path_of(new_link(shop, kind="general", ref="group:5"))
+    a = Client(shop.app, ip="198.51.100.12")
+    b = Client(shop.app, ip="198.51.100.13")
+    ta = submit(a, gpath, ["T1001A-F"], account="fake_a_0001").header("Location")[3:]
+    tb = submit(b, gpath, ["T1001A-F"], account="fake_b_0002").header("Location")[3:]
+    assert re.match(r"^[A-Za-z0-9_-]{32}$", ta) and ta != tb
+    stored = [r[0] for r in db_rows(shop.app, "SELECT token_hash FROM links WHERE parent_id IS NOT NULL")]
+    assert sorted(stored) == sorted(hashlib.sha256(t.encode()).hexdigest() for t in (ta, tb))
+    for name, data in _db_files(shop.app).items():
+        assert ta.encode() not in data and tb.encode() not in data, name
+
+
+def test_forwarded_headers_only_from_internal_peers(make_app):
+    app = make_app(trust_proxy=True, rate_admin_fail=(3, 60))
+    outside = Client(app, ip=INTERNET)
+    codes = [outside.api("GET", "status", token="w" * 40, headers={"X-Forwarded-For": "192.0.2.%d" % i}).code
+             for i in range(6)]
+    assert codes == [401, 401, 401, 429, 429, 429]  # rotating XFF does not help from outside
+    proxy = Client(app, ip="127.0.0.1")
+    for i in range(4):  # behind our proxy each forwarded client has its own count
+        resp = proxy.api("GET", "status", token="w" * 40, headers={"X-Forwarded-For": "192.0.2.%d" % (50 + i)})
+        assert resp.code == 401
+    assert proxy.api("GET", "status").code == 200
+
+
+def test_ipv6_clients_are_counted_by_their_64(make_app):
+    app = make_app(rate_page=(2, 60))
+    for ip in ("2001:db8:1:2::1", "2001:db8:1:2::abcd"):
+        assert Client(app, ip=ip).get("/").code == 200
+    assert Client(app, ip="2001:db8:1:2:ffff::9").get("/").code == 429
+    assert Client(app, ip="2001:db8:1:3::1").get("/").code == 200
+
+
+def test_rate_limiter_evicts_the_oldest_keys_only():
+    from sample_site.security import RateLimiter
+    limiter = RateLimiter(max_keys=3)
+    for key in ("a", "b", "c"):
+        assert limiter.hit("admin_fail", key, 1, 60)
+    assert limiter.hit("admin_fail", "d", 1, 60)  # "a" is evicted, the others stay
+    assert len(limiter) == 3
+    assert not limiter.hit("admin_fail", "b", 1, 60) and not limiter.hit("admin_fail", "d", 1, 60)
+    assert limiter.hit("admin_fail", "a", 1, 60)
+
+
+def test_failed_commit_leaves_the_connection_usable(app):
+    conn = app.store._conn
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("CREATE TABLE parent_t (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE child_t (pid INTEGER REFERENCES parent_t(id) DEFERRABLE INITIALLY DEFERRED)")
+    with pytest.raises(sqlite3.IntegrityError):
+        with app.store.tx() as cur:
+            cur.execute("INSERT INTO child_t VALUES (42)")  # fails only at COMMIT
+    assert not conn.in_transaction
+    app.store.set_meta("after", "ok")
+    assert app.store.meta("after") == "ok"
+    assert Client(app).api("POST", "links", {"ref": "deal:after"}).code == 200
+
+
+def test_cookie_secure_except_on_a_loopback_host(shop):
+    gpath = path_of(new_link(shop, kind="general", ref="group:6"))
+    for host, secure in (("127.0.0.1:8080", False), ("localhost:8080", False), ("[::1]:8080", False),
+                         ("xuan.example.test", True)):
+        browser = Client(shop.app, ip="198.51.100.%d" % (120 + len(host)), host=host)
+        done = submit(browser, gpath, ["T1001A-F"], account="fake_host_%d" % len(host))
+        assert ("; Secure" in done.header("Set-Cookie")) is secure, host
+
+
+def test_request_environ_never_holds_the_process_environment(shop, monkeypatch):
+    monkeypatch.setenv("SAMPLE_SITE_ADMIN_TOKEN", "should-never-be-seen-" + "q" * 20)
+    seen = {}
+
+    def spy(environ, start_response):
+        seen.update(environ)
+        return shop.app(environ, start_response)
+
+    server = make_wsgi_server(spy, "127.0.0.1", 0)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True).start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        conn.request("GET", "/healthz")
+        assert conn.getresponse().read() == b"ok"
+        conn.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert seen.get("PATH_INFO") == "/healthz"
+    for key in ("SAMPLE_SITE_ADMIN_TOKEN", "PATH", "HOME"):
+        assert key not in seen, key
+
+
+def test_her_page_shows_the_receiver_masked_in_every_state(shop):
+    path = path_of(new_link(shop, ask_account=True))
+    submit(shop, path, ["T1001A-F"], account="xiaomei.private")
+    edit = shop.get(path + "?edit=1")
+    assert "为了保护您的信息，手机号、详细地址和抖音号请再填一次" in visible_text(edit.text)
+    assert "xiaomei.private" not in edit.text and "13800000000" not in edit.text
+    shown = []
+    shown.append(shop.get(path))  # before the pull
+    ids = [s["id"] for s in pull(shop)]
+    shown.append(shop.get(path))  # taken
+    shop.api("POST", "submissions/ack", {"owner": "main", "ids": ids})
+    shown.append(shop.get(path))  # acked
+    for page in shown:
+        dd = re.search(r"<dd data-receiver>(.*?)</dd>", page.text).group(1)
+        assert dd == RECEIVER_SHOWN
+        for private in ("小美", "13800000000", "138****", "西湖区", "测试路", "xiaomei.private"):
+            assert private not in page.text, private
+    city = path_of(new_link(shop, ref="deal:sh"))
+    submit(shop, city, ["T1001A-F"], province="上海市", city="上海市", district="浦东新区")
+    assert "尾号 0000 · 上海市<" in shop.get(city).text

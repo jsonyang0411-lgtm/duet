@@ -1,8 +1,9 @@
 """Rate limiting, log-safe paths, tokens and signed form nonces."""
 
-import base64
+import collections
 import hashlib
 import hmac
+import ipaddress
 import re
 import secrets
 import threading
@@ -24,50 +25,106 @@ def token_ok(token):
 
 
 class RateLimiter(object):
-    """Sliding-window counters per (bucket, key), in memory, thread-safe."""
+    """Sliding-window counters per (bucket, key), in memory, thread-safe.
+
+    Each key remembers its own window, so a 24-hour counter is not swept after
+    an hour. When the table is full the least recently used keys are evicted
+    (never everything at once).
+    """
 
     MAX_KEYS = 50000
 
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, max_keys=None):
         self._clock = clock
         self._lock = threading.Lock()
-        self._hits = {}
+        self._hits = collections.OrderedDict()  # (bucket, key) -> (window, deque of times)
         self._last_sweep = clock()
+        self.max_keys = max_keys or self.MAX_KEYS
+
+    def _entry(self, bucket, key, window, now, create):
+        item = self._hits.get((bucket, key))
+        if item is None:
+            if not create:
+                return None
+            item = (window, collections.deque())
+            self._hits[(bucket, key)] = item
+            while len(self._hits) > self.max_keys:
+                self._hits.popitem(last=False)
+        else:
+            self._hits.move_to_end((bucket, key))
+        times = item[1]
+        cutoff = now - window
+        while times and times[0] <= cutoff:
+            times.popleft()
+        return times
 
     def hit(self, bucket, key, limit, window):
-        """Count one event; False when the limit for the window is exceeded."""
+        """Count one event; False (and not counted) when the limit is reached."""
         now = self._clock()
         with self._lock:
             self._sweep(now)
-            entry = self._hits.get((bucket, key))
-            if entry is None:
-                entry = []
-                self._hits[(bucket, key)] = entry
-            cutoff = now - window
-            while entry and entry[0] <= cutoff:
-                entry.pop(0)
-            if len(entry) >= limit:
+            times = self._entry(bucket, key, window, now, True)
+            if len(times) >= limit:
                 return False
-            entry.append(now)
+            times.append(now)
             return True
 
     def over(self, bucket, key, limit, window):
         """True when the key already reached the limit (does not count)."""
         now = self._clock()
         with self._lock:
-            entry = self._hits.get((bucket, key)) or []
-            cutoff = now - window
-            return sum(1 for t in entry if t > cutoff) >= limit
+            times = self._entry(bucket, key, window, now, False)
+            return (len(times) if times is not None else 0) >= limit
+
+    def __len__(self):
+        return len(self._hits)
 
     def _sweep(self, now):
-        if now - self._last_sweep < 60 and len(self._hits) < self.MAX_KEYS:
+        if now - self._last_sweep < 60:
             return
         self._last_sweep = now
-        horizon = now - 3600
-        for k in [k for k, v in self._hits.items() if not v or v[-1] <= horizon]:
+        dead = [k for k, (window, times) in self._hits.items() if not times or times[-1] <= now - window]
+        for k in dead:
             del self._hits[k]
-        if len(self._hits) >= self.MAX_KEYS:
-            self._hits.clear()
+
+
+def client_key(ip):
+    """The rate-limit key for an address: IPv6 by its /64, IPv4 as is."""
+    try:
+        addr = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return (ip or "-")[:64]
+    if addr.version == 6:
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network("%s/64" % addr, strict=False))
+    return str(addr)
+
+
+def is_internal_peer(ip):
+    """True for loopback / private addresses (where a reverse proxy sits)."""
+    try:
+        addr = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return False
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return addr.is_loopback or addr.is_private
+
+
+def is_loopback_host(host):
+    """True when a Host header names this machine (plain-http local use)."""
+    host = (host or "").strip().lower()
+    if host.startswith("["):
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class Signer(object):
@@ -90,13 +147,6 @@ class Signer(object):
         r, sig = nonce.split(".", 1)
         return bool(re.match(r"^[0-9a-f]{24}$", r)) and hmac.compare_digest(
             sig, self._mac("nonce:%d:%s" % (link_id, r)))
-
-    def child_token(self, general_id, nonce):
-        """The personal token a general link's submission gets: fixed per nonce,
-        so a double submit lands on the same personal link."""
-        raw = hmac.new(self._key, ("child:%d:%s" % (general_id, nonce)).encode("utf-8"),
-                       hashlib.sha256).digest()
-        return base64.urlsafe_b64encode(raw[:24]).decode("ascii").rstrip("=")
 
     def ip_tag(self, ip):
         """A short, salted tag for an IP (rate-limit log lines only)."""

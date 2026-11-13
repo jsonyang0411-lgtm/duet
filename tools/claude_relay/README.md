@@ -512,6 +512,8 @@ worker 做三种任务，都不用模型：
 
 淘宝店销量排行（生意参谋）现在读不到，目录默认按聚水潭「近 30 天热卖」（ERP 全店铺）；`catalog.source: manual` 用手写的款号单。
 
+安全（2026-11-13 评审）：管理接口的请求从不跟着跳转走（urllib 默认会把 `Authorization` 带到跳转去的地方，别的主机、明文 http 也带）：网站答 3xx 就报「答了一个跳转」，把 `sample_site.url` 改成最终的 https 地址。通用链接来的提交，抖音号是提交的人自己填的：机器人那边一律要人批、不自动建（见 `sample-site.md` 第三节）。
+
 ### 两端的版本
 
 旧版 worker 不会说自己能做 prm 任务（请求里没有 `X-Relay-Kinds`），机器人就不会把 prm 任务交给它：达人的话永远不会被当成 cc 任务执行。升级时先升级 Mac 端，再在 Windows 上打开 `PRM_COPILOT`。

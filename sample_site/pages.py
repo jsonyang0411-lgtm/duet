@@ -7,7 +7,7 @@ through ``e()``; there are no inline scripts or styles (strict CSP).
 
 import html
 
-from .forms import MESSAGES, PROVINCES, mask_phone
+from .forms import MESSAGES, PROVINCES, receiver_line
 
 TEXT = {
     "subtitle": "样品选款",
@@ -63,6 +63,17 @@ TEXT = {
     "bad_request": "页面出了点问题，请返回重新打开链接",
     "server_error": "页面出了点问题，请过一会儿再试，或直接微信联系运营",
     "not_found": "没有这个页面",
+    "slow": "网络有点慢，这次没有提交成功，请再试一次",
+    "receiver_short": "收货",
+    "receiver_note": "为了保护您的信息，这里只显示手机尾号和所在城市。",
+    "refill": "为了保护您的信息，手机号和详细地址请再填一次",
+    "refill_account": "为了保护您的信息，手机号、详细地址和抖音号请再填一次",
+    "choice_title": "这台手机刚用这个链接提交过选款",
+    "choice_sub": "如果是帮另一位老师填写，请点下面第二个按钮。",
+    "choice_mine": "查看刚才的提交",
+    "choice_other": "替另一位老师填写",
+    "duplicate_sub": "这份选款已经提交过了。如需查看或修改，请用提交后打开的页面，或直接微信联系运营。",
+    "per_client": "这台设备用这个链接提交的次数有点多了，如需继续，请直接微信联系运营",
 }
 
 DEFAULT_SIZE = (600, 600)
@@ -102,10 +113,11 @@ def message_page(brand, static, text, sub="", icon="i", page_class="page-msg"):
     lines = text.split("，")
     title = "".join("<span>%s</span>" % e(line + ("，" if i < len(lines) - 1 else ""))
                     for i, line in enumerate(lines))
+    mark = ('<div class="tick" aria-hidden="true"></div>' if icon == "ok"
+            else '<div class="msg-icon msg-icon-%s" aria-hidden="true"></div>' % e(icon))
     body = (
-        '<section class="msg"><div class="msg-icon msg-icon-%s" aria-hidden="true"></div>'
-        '<h1 class="msg-title">%s</h1>%s</section>'
-    ) % (e(icon), title, ('<p class="msg-sub">%s</p>' % e(sub)) if sub else "")
+        '<section class="msg">%s<h1 class="msg-title">%s</h1>%s</section>'
+    ) % (mark, title, ('<p class="msg-sub">%s</p>' % e(sub)) if sub else "")
     return layout(brand, body, static, page_class)
 
 
@@ -192,7 +204,7 @@ def _card(style, selected, sizes):
 
 
 def page_pick(brand, static, action, catalog, sizes, max_items, ask_account, typed=None,
-              errors=None, stale=False, start="pick"):
+              errors=None, stale=False, start="pick", refill=False):
     """The pick page (also re-rendered with errors and when editing)."""
     typed = typed or {}
     errors = errors or {}
@@ -231,6 +243,9 @@ def page_pick(brand, static, action, catalog, sizes, max_items, ask_account, typ
         '<div class="paste-row"><button type="button" class="btn btn-ghost" data-paste>%s</button>'
         '<span class="hint" data-paste-msg></span></div></div>' % (
             e(TEXT["paste_label"]), e(TEXT["paste_ph"]), e(TEXT["paste_go"])))
+    if refill:
+        form.append('<p class="notice notice-refill">%s</p>' % e(
+            TEXT["refill_account"] if ask_account else TEXT["refill"]))
     form.append(_field("name", TEXT["f_name"],
                        _input("name", typed.get("name", ""), errors, maxlength=30,
                               extra=' autocomplete="name"'), errors))
@@ -277,8 +292,9 @@ def _items_list(items, sizes):
     return '<ul class="items">%s</ul>' % "".join(rows)
 
 
-def _receiver_list(receiver, account, phone_masked):
-    phone = mask_phone(receiver.get("phone")) if phone_masked else receiver.get("phone", "")
+def _receiver_list(receiver, account):
+    """The full receiver (the confirm page, right after she typed it)."""
+    phone = receiver.get("phone", "")
     addr = "".join(x for x in (receiver.get("province", ""), _city(receiver),
                                receiver.get("district", ""), receiver.get("address", "")) if x)
     rows = [
@@ -317,13 +333,14 @@ def page_confirm(brand, static, action, items, receiver, account, typed, nonce, 
         '</form>'
     ) % (e(TEXT["confirm_title"]), e(TEXT["confirm_sub"]), e(TEXT["your_picks"]),
          _items_list(items, sizes), e(TEXT["receiver"]),
-         _receiver_list(receiver, account, phone_masked=False), e(TEXT["privacy"]), e(action),
+         _receiver_list(receiver, account), e(TEXT["privacy"]), e(action),
          "".join(hidden), e(TEXT["submit"]), e(TEXT["edit"]))
     return layout(brand, body, static, "page-confirm")
 
 
 def page_summary(brand, static, sub, sizes, editable, edit_url, keep_link):
-    masked = sub["state"] == "acked" or sub.get("purged")
+    """Her page after submitting. The receiver is masked in every state (the
+    link may be forwarded): phone tail and province/city only."""
     receiver = sub["receiver"]
     parts = ['<section class="done"><div class="tick" aria-hidden="true"></div>'
              '<h1 class="done-title">%s</h1>' % e(TEXT["thanks"])]
@@ -336,10 +353,30 @@ def page_summary(brand, static, sub, sizes, editable, edit_url, keep_link):
         parts.append('<p class="notice">%s</p>' % e(TEXT["keep_link"]))
     parts.append('<div class="panel"><h2>%s</h2>%s</div>' % (
         e(TEXT["your_picks"]), _items_list(sub["items"], sizes)))
-    parts.append('<div class="panel"><h2>%s</h2>%s</div>' % (
-        e(TEXT["receiver"]),
-        _receiver_list(receiver, None if masked else sub.get("account"), phone_masked=True)))
+    parts.append(
+        '<div class="panel"><h2>%s</h2><dl class="kv"><div><dt>%s</dt><dd data-receiver>%s</dd></div></dl>'
+        '<p class="hint">%s</p></div>' % (
+            e(TEXT["receiver"]), e(TEXT["receiver_short"]), e(receiver_line(receiver)),
+            e(TEXT["receiver_note"])))
     if editable:
         parts.append('<div class="actions"><a class="btn btn-secondary btn-block" href="%s">%s</a></div>'
                      % (e(edit_url), e(TEXT["edit_btn"])))
     return layout(brand, "".join(parts), static, "page-summary")
+
+
+def page_duplicate(brand, static):
+    """A form that was submitted already (double tap, replay): no link."""
+    return message_page(brand, static, TEXT["thanks"], TEXT["duplicate_sub"], icon="ok")
+
+
+def page_general_choice(brand, static, own_url, fresh_url):
+    """The general link opened again in a browser that submitted through it."""
+    body = (
+        '<section class="msg msg-choice"><div class="msg-icon msg-icon-link" aria-hidden="true"></div>'
+        '<h1 class="msg-title">%s</h1><p class="msg-sub">%s</p></section>'
+        '<div class="actions">'
+        '<a class="btn btn-primary btn-block" href="%s">%s</a>'
+        '<a class="btn btn-secondary btn-block" href="%s">%s</a></div>'
+    ) % (e(TEXT["choice_title"]), e(TEXT["choice_sub"]), e(own_url), e(TEXT["choice_mine"]),
+         e(fresh_url), e(TEXT["choice_other"]))
+    return layout(brand, body, static, "page-msg")

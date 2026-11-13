@@ -13,3 +13,4 @@ docker-compose*.yml
 Caddyfile*
 site.env
 *.md
+admin_token*

@@ -288,6 +288,9 @@ def main(argv=None):
             page2.click(".actions a.btn")
             page2.wait_for_load_state("networkidle")
             shot(page2, "06b-edit.png")
+            page2.click("[data-next]")
+            page2.wait_for_selector("#details", state="visible")
+            shot(page2, "06c-edit-details.png", full=True)
 
             api.call("POST", "submissions/pull", {"owner": "main"})
             page2.goto(s_url)
@@ -312,6 +315,9 @@ def main(argv=None):
             g.click("button[value=submit]")
             g.wait_for_load_state("networkidle")
             shot(g, "09c-general-done.png", full=True)
+            g.goto(g_url)  # the same phone opens the general link again
+            g.wait_for_load_state("networkidle")
+            shot(g, "09d-general-again.png")
             browser.close()
     finally:
         server.shutdown()

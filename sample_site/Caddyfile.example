@@ -1,9 +1,29 @@
 # Replace the domain. Caddy gets and renews the HTTPS certificate itself.
-# Do not add a "log" directive: access logs would hold the creators' link tokens.
+# Keep both blocks as they are (DEPLOY.md, section 6):
+#  - the link tokens of the creators are in the URLs, so no access log ("log" in the site block)
+#    and no error / proxy log lines with the request in them;
+#  - Caddy reads the whole request (body within 10 s) before passing it on,
+#    so slow clients cannot tie up the site's threads.
+{
+	log default {
+		exclude http.log.error http.handlers.reverse_proxy
+	}
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 10s
+			write 30s
+			idle 2m
+		}
+	}
+}
+
 xuan.example.com {
 	request_body {
 		max_size 3MB
 	}
 	encode gzip
-	reverse_proxy site:8080
+	reverse_proxy site:8080 {
+		request_buffers 3MB
+	}
 }

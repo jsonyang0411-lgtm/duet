@@ -7,7 +7,7 @@ In-process use (tests, other tools)::
 
     from sample_site.app import create_app
     from sample_site.config import Config
-    app = create_app(Config(admin_token="x" * 40, db_path="/tmp/site.db"))
+    app = create_app(Config(admin_token=secrets.token_urlsafe(32), db_path="/tmp/site.db"))
 """
 
 __version__ = "1.0.0"

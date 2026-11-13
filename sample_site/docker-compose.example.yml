@@ -1,17 +1,26 @@
 # Example: the site behind Caddy (automatic HTTPS). Copy to docker-compose.yml,
-# put your domain into Caddyfile and your settings into site.env (chmod 600),
+# put your domain into Caddyfile, your settings into site.env (chmod 600) and
+# the admin token into admin_token.txt (owner 10001, chmod 400; DEPLOY.md, section 5),
 # then: docker compose up -d --build
 services:
   site:
     build: .
     restart: unless-stopped
-    env_file: site.env          # SAMPLE_SITE_ADMIN_TOKEN=..., SAMPLE_SITE_PUBLIC_URL=https://...
+    env_file: site.env          # SAMPLE_SITE_PUBLIC_URL=https://...
     environment:
       SAMPLE_SITE_TRUST_PROXY: "1"
+      SAMPLE_SITE_ADMIN_TOKEN_FILE: /run/secrets/admin_token
+    secrets:
+      - admin_token
     volumes:
       - site-data:/data
     expose:
       - "8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2
@@ -25,6 +34,15 @@ services:
       - caddy-config:/config
     depends_on:
       - site
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  admin_token:
+    file: ./admin_token.txt
 
 volumes:
   site-data:

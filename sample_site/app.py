@@ -2,13 +2,13 @@
 
 Run it from inside its folder (whatever the folder is called)::
 
-    SAMPLE_SITE_ADMIN_TOKEN=... python3 app.py
+    SAMPLE_SITE_ADMIN_TOKEN_FILE=/path/to/token python3 app.py
 
 or build it in-process::
 
     from sample_site.app import create_app
     from sample_site.config import Config
-    app = create_app(Config(admin_token="x" * 40, db_path="/tmp/site.db"))
+    app = create_app(Config(admin_token=secrets.token_urlsafe(32), db_path="/tmp/site.db"))
 """
 
 if __name__ == "__main__" and not __package__:
@@ -37,9 +37,11 @@ import logging
 import os
 import re
 import signal
+import socket
 import socketserver
 import sys
 import threading
+import time
 import traceback
 from urllib.parse import parse_qs
 from wsgiref.simple_server import ServerHandler, WSGIRequestHandler, WSGIServer, make_server
@@ -48,8 +50,8 @@ from . import pages
 from .catalog import IMAGE_KEY_RE, Catalog, CatalogError, image_key, sniff_image, validate_catalog
 from .config import Config, ConfigError
 from .forms import check_form
-from .security import (RateLimiter, Signer, new_token, safe_path, scrub, token_hash,
-                       token_ok)
+from .security import (RateLimiter, Signer, client_key, is_internal_peer, is_loopback_host, new_token,
+                       safe_path, scrub, token_hash, token_ok)
 from .store import Store
 
 log = logging.getLogger("sample_site")
@@ -84,9 +86,13 @@ class Response(object):
         self.cache = cache or "no-store"
 
 
+BODY_CHUNK = 16384
+
+
 class Request(object):
-    def __init__(self, environ):
+    def __init__(self, environ, body_deadline=10.0):
         self.environ = environ
+        self.body_deadline = body_deadline
         self.method = (environ.get("REQUEST_METHOD") or "GET").upper()
         raw = environ.get("PATH_INFO") or "/"
         try:
@@ -125,10 +131,41 @@ class Request(object):
             raise HttpError(400, "bad_request", "bad Content-Length")
         if n > cap:
             raise HttpError(413, "too_large", "body larger than %d bytes" % cap)
-        data = self.environ["wsgi.input"].read(n) if n else b""
-        if len(data) != n:
+        if not n:
+            return b""
+        # Read in chunks under one total deadline, so a client sending a byte
+        # now and then cannot hold a server thread (the per-read socket timeout
+        # alone would let it). Our own server hands over the socket, so a
+        # single read cannot block past the deadline either.
+        stream = self.environ["wsgi.input"]
+        reader = getattr(stream, "read1", None) or stream.read
+        sock = self.environ.get("sample_site.socket")
+        deadline = time.monotonic() + self.body_deadline
+        parts = []
+        got = 0
+        try:
+            while got < n:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise HttpError(408, "timeout", "the request body did not arrive in time")
+                if sock is not None:
+                    sock.settimeout(max(0.05, left))
+                chunk = reader(min(BODY_CHUNK, n - got))
+                if not chunk:
+                    break
+                parts.append(chunk)
+                got += len(chunk)
+        except (socket.timeout, OSError):
+            raise HttpError(408, "timeout", "the request body did not arrive in time")
+        finally:
+            if sock is not None:
+                try:
+                    sock.settimeout(self.environ.get("sample_site.socket_timeout"))
+                except OSError:
+                    pass
+        if got != n:
             raise HttpError(400, "bad_request", "body shorter than Content-Length")
-        return data
+        return b"".join(parts)
 
 
 def _load_static():
@@ -174,7 +211,7 @@ class App(object):
     # -- WSGI ----------------------------------------------------------------
 
     def __call__(self, environ, start_response):
-        req = Request(environ)
+        req = Request(environ, self.config.body_deadline)
         try:
             self.maybe_purge()
         except Exception:
@@ -215,7 +252,7 @@ class App(object):
             return self._json(err.status, {"ok": False, "error": err.code, "message": err.message})
         text = {
             413: pages.TEXT["too_big"], 429: pages.TEXT["busy"], 404: pages.TEXT["not_found"],
-            500: pages.TEXT["server_error"],
+            500: pages.TEXT["server_error"], 408: pages.TEXT["slow"],
         }.get(err.status, pages.TEXT["bad_request"])
         return Response(err.status, pages.message_page(self.config.brand, self.static_urls, text))
 
@@ -250,14 +287,18 @@ class App(object):
 
     # -- helpers -------------------------------------------------------------
 
+    def _proxied(self, req):
+        """Forwarded headers count only with TRUST_PROXY and when the peer is
+        loopback / private (the reverse proxy), never from the internet."""
+        return self.config.trust_proxy and is_internal_peer(req.environ.get("REMOTE_ADDR"))
+
     def client_ip(self, req):
-        if self.config.trust_proxy:
-            xff = req.header("X-Forwarded-For")
-            if xff:
-                last = xff.split(",")[-1].strip()
-                if last:
-                    return last[:64]
-        return (req.environ.get("REMOTE_ADDR") or "-")[:64]
+        """The rate-limit key of the client (IPv6 by its /64)."""
+        if self._proxied(req):
+            last = req.header("X-Forwarded-For").split(",")[-1].strip()
+            if last:
+                return client_key(last)
+        return client_key(req.environ.get("REMOTE_ADDR") or "-")
 
     def _limit(self, req, bucket, rule):
         ip = self.client_ip(req)
@@ -268,7 +309,7 @@ class App(object):
     def _is_https(self, req):
         if self.config.public_url:
             return self.config.https
-        if self.config.trust_proxy and req.header("X-Forwarded-Proto").split(",")[-1].strip() == "https":
+        if self._proxied(req) and req.header("X-Forwarded-Proto").split(",")[-1].strip() == "https":
             return True
         return req.environ.get("wsgi.url_scheme") == "https"
 
@@ -277,7 +318,7 @@ class App(object):
             return self.config.public_url
         scheme = "https" if self._is_https(req) else "http"
         host = ""
-        if self.config.trust_proxy:
+        if self._proxied(req):
             host = req.header("X-Forwarded-Host").split(",")[-1].strip()
         host = host or req.header("Host")
         if not host or not HOST_RE.match(host):
@@ -368,6 +409,8 @@ class App(object):
         link = self.store.link_by_hash(token_hash(token))
         if link is None or link["revoked_at"] is not None or link["kind"] != kind:
             return None
+        if link.get("parent_revoked_at") is not None:  # its general link was revoked
+            return None
         if self.clock() >= link["expires_at"]:
             return None
         return link
@@ -385,9 +428,11 @@ class App(object):
         prefix = "/g/" if general else "/s/"
         action = prefix + token
         if general:
-            child = self._child_from_cookie(req, link)
-            if child is not None:
-                return self._redirect("/s/" + child)
+            if req.method in ("GET", "HEAD") and req.arg("new") != "1":
+                child = self._child_from_cookie(req, link)
+                if child is not None:  # she (or someone on her phone) submitted before
+                    return self._html(pages.page_general_choice(
+                        self.config.brand, self.static_urls, "/s/" + child, action + "?new=1"))
             if link["max_uses"] is not None and link["uses"] >= link["max_uses"]:
                 return self._invalid()
             sub = None
@@ -430,21 +475,24 @@ class App(object):
             raise HttpError(400, "bad_request", "form not readable")
 
     def _pick_page(self, action, link, ask, typed=None, errors=None, stale=False, start="pick",
-                   status=200):
+                   status=200, refill=False):
         cat, sizes = self.catalog()
         body = pages.page_pick(self.config.brand, self.static_urls, action, cat, sizes,
                                link["max_items"], ask, typed=typed, errors=errors, stale=stale,
-                               start=start)
+                               start=start, refill=refill)
         return self._html(body, status)
 
     def _pick_from_submission(self, action, link, ask, sub):
+        """The edit form: her picks and the coarse address are filled in; the
+        phone, street address and 抖音号 are typed again (the link may have
+        been forwarded)."""
         cat, _sizes = self.catalog()
         picks = [it["sku"] for it in sub["items"] if it["sku"] in cat.by_sku]
         stale = len(picks) != len(sub["items"])
-        typed = dict(sub["receiver"])
-        typed["account"] = sub.get("account") or ""
+        receiver = sub["receiver"]
+        typed = {k: receiver.get(k, "") for k in ("name", "province", "city", "district")}
         typed["pick"] = picks
-        return self._pick_page(action, link, ask, typed=typed, stale=stale)
+        return self._pick_page(action, link, ask, typed=typed, stale=stale, refill=True)
 
     def _summary(self, sub, editable, action, link, status=200):
         keys = [it["image"] for it in sub["items"]]
@@ -463,6 +511,9 @@ class App(object):
             stale = len(picks) != len(form.get("pick", []))
             typed["pick"] = picks
             return self._pick_page(action_url, link, ask, typed=typed, stale=stale)
+        if general and self._general_capped(req, link):
+            return self._html(pages.message_page(self.config.brand, self.static_urls,
+                                                 pages.TEXT["per_client"]), 429)
         clean, errors, typed = check_form(form, cat, link["max_items"], ask)
         if errors:
             typed["pick"] = [p for p in typed.get("pick", []) if p in cat.by_sku]
@@ -485,17 +536,32 @@ class App(object):
             log.info("submission saved for link %d", link["id"])
         return self._redirect("/s/" + token)
 
+    def _general_capped(self, req, link):
+        rule = self.config.general_per_client
+        return self.limiter.over("general%d" % link["id"], self.client_ip(req), rule[0], rule[1])
+
+    def _cookie_secure(self, req):
+        """Secure on every cookie except for a plain-http loopback host (local tests)."""
+        if self._is_https(req):
+            return True
+        host = req.header("Host") or req.environ.get("SERVER_NAME", "")
+        return not is_loopback_host(host)
+
     def _submit_general(self, req, link, clean, nonce):
         now = self.clock()
         life = max(7 * 86400.0, min(90 * 86400.0, link["expires_at"] - link["created_at"]))
-        child = self.signer.child_token(link["id"], nonce)
+        child = new_token()  # random; only its hash is stored
         result = self.store.submit_general(link, token_hash(child), clean, nonce, now + life)
         if result == "full":
             return self._invalid()
-        if result == "saved":
-            log.info("general link %d: new personal link made with a submission", link["id"])
+        if result == "duplicate":
+            # A double tap or a replayed form: the first submit won. No link here.
+            return self._html(pages.page_duplicate(self.config.brand, self.static_urls))
+        rule = self.config.general_per_client
+        self.limiter.hit("general%d" % link["id"], self.client_ip(req), rule[0], rule[1])
+        log.info("general link %d: new personal link made with a submission", link["id"])
         cookie = "sg%d=%s; Path=/g/; Max-Age=%d; HttpOnly; SameSite=Lax" % (link["id"], child, int(life))
-        if self._is_https(req):
+        if self._cookie_secure(req):
             cookie += "; Secure"
         return self._redirect("/s/" + child, headers=[("Set-Cookie", cookie)])
 
@@ -511,12 +577,13 @@ class App(object):
         return hmac.compare_digest(presented, self._admin_token) and bool(presented)
 
     def admin(self, req, sub):
-        ip = self.client_ip(req)
-        rule = self.config.rate_admin_fail
-        if self.limiter.over("admin_fail", ip, rule[0], rule[1]):
-            raise HttpError(429, "rate_limited", "too many failed attempts, try again later")
+        # The token is checked first: the right token is never locked out by
+        # someone else's failures; only failures are counted and limited.
         if not self._auth_ok(req):
-            self.limiter.hit("admin_fail", ip, rule[0], rule[1])
+            ip = self.client_ip(req)
+            rule = self.config.rate_admin_fail
+            if not self.limiter.hit("admin_fail", ip, rule[0], rule[1]):
+                raise HttpError(429, "rate_limited", "too many failed attempts, try again later")
             log.warning("admin: authentication failed (client %s)", self.signer.ip_tag(ip))
             raise HttpError(401, "unauthorized", "missing or wrong admin token")
         m = req.method
@@ -726,6 +793,9 @@ def create_app(config):
 
 class _ServerHandler(ServerHandler):
     server_software = "sample-site"
+    # wsgiref copies the whole process environment (admin token included) into
+    # every request environ; nothing here reads configuration from environ.
+    os_environ = {}
 
 
 class _Handler(WSGIRequestHandler):
@@ -753,6 +823,12 @@ class _Handler(WSGIRequestHandler):
 
     def address_string(self):
         return "-"
+
+    def get_environ(self):
+        env = WSGIRequestHandler.get_environ(self)
+        env["sample_site.socket"] = self.connection  # lets read_body keep its deadline
+        env["sample_site.socket_timeout"] = self.timeout
+        return env
 
     def log_request(self, code="-", size="-"):
         access_log.info("%s %s %s", getattr(self, "command", None) or "-",

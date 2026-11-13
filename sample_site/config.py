@@ -7,6 +7,22 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, Optional, Tuple
 
 TOKEN_RE = re.compile(r"^[\x21-\x7e]{32,512}$")
+# Example values shipped in the repo; a server must never run with them.
+PLACEHOLDER_TOKENS = frozenset([
+    "put-a-long-random-token-here-at-least-32-characters",
+])
+MIN_DISTINCT_TOKEN_CHARS = 8
+
+
+def token_problem(token):
+    """Why an admin token cannot be used, or "" when it is fine."""
+    if not isinstance(token, str) or not TOKEN_RE.match(token):
+        return "未设置、少于 32 个字符或含有空格等字符"
+    if token in PLACEHOLDER_TOKENS or "put-a-long-random-token" in token:
+        return "还是示例文件里的占位口令"
+    if len(set(token)) < MIN_DISTINCT_TOKEN_CHARS:
+        return "太简单（不同的字符少于 %d 个）" % MIN_DISTINCT_TOKEN_CHARS
+    return ""
 
 
 class ConfigError(ValueError):
@@ -37,6 +53,10 @@ class Config:
     max_admin_json_bytes: int = 64 * 1024
     # Purge job interval (seconds); the job also runs lazily on requests.
     purge_interval: int = 3600
+    # A request body must arrive within this many seconds in total (else 408).
+    body_deadline: float = 10.0
+    # Submissions per client (IP, IPv6 /64) per general link: (count, seconds).
+    general_per_client: Tuple[int, int] = (3, 86400)
 
     def __repr__(self):  # never print the admin token
         return "Config(db_path=%r, host=%r, port=%r, public_url=%r)" % (
@@ -44,11 +64,11 @@ class Config:
 
     def validate(self):
         """Raise ConfigError when a value cannot be used."""
-        if not isinstance(self.admin_token, str) or not TOKEN_RE.match(self.admin_token):
+        problem = token_problem(self.admin_token)
+        if problem:
             raise ConfigError(
-                "管理口令（SAMPLE_SITE_ADMIN_TOKEN 或 SAMPLE_SITE_ADMIN_TOKEN_FILE）未设置、"
-                "少于 32 个字符或含有空格等字符，拒绝启动。可以用 "
-                "`python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"` 生成一个。")
+                "管理口令（SAMPLE_SITE_ADMIN_TOKEN_FILE 或 SAMPLE_SITE_ADMIN_TOKEN）%s，拒绝启动。可以用 "
+                "`python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"` 生成一个。" % problem)
         url = (self.public_url or "").strip()
         if url:
             if not re.match(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?(/[A-Za-z0-9._~\-/]*)?$", url):

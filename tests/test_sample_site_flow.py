@@ -129,7 +129,8 @@ def test_creator_flow_in_a_phone_browser(browser, site):
         # reopening the link shows the summary; editing replaces the choice
         page.goto(url)
         body = page.inner_text("body")
-        assert "已收到您的选款" in body and "138****0000" in body
+        assert "已收到您的选款" in body and "尾号 0000 · 浙江省杭州市" in body
+        assert "小美" not in body and "测试路" not in body
         page.click(".actions a.btn")
         page.wait_for_load_state()
         assert page.locator("[data-count]").inner_text() == "2"
@@ -137,7 +138,12 @@ def test_creator_flow_in_a_phone_browser(browser, site):
         assert page.locator("[data-count]").inner_text() == "1"
         page.click("[data-next]")
         page.wait_for_selector("#details", state="visible")
-        assert page.input_value("#f-address") == "测试路 1 号"
+        # name and region come back; phone and street address are typed again
+        assert page.input_value("#f-name") == "小美" and page.input_value("#f-district") == "西湖区"
+        assert page.input_value("#f-phone") == "" and page.input_value("#f-address") == ""
+        assert "手机号和详细地址请再填一次" in page.inner_text("#details")
+        page.fill("#f-phone", "13800000000")
+        page.fill("#f-address", "测试路 1 号")
         page.click("[data-submit]")
         page.wait_for_load_state()
         page.click("button[value=submit]")
@@ -208,8 +214,15 @@ def test_general_link_in_a_phone_browser(browser, site):
         page.wait_for_load_state()
         own = page.url
         assert "/s/" in own and "请收藏这个页面" in page.inner_text("body")
-        page.goto(url)  # the cookie brings her back to her own page
+        page.goto(url)  # the cookie offers her own page, or a fresh form for someone else
+        assert page.url == url and "替另一位老师填写" in page.inner_text("body")
+        page.click("text=查看刚才的提交")
+        page.wait_for_load_state()
         assert page.url == own
+        page.goto(url)
+        page.click("text=替另一位老师填写")
+        page.wait_for_load_state()
+        assert page.locator("[data-card]").count() == 3 and page.url.endswith("?new=1")
         assert problems == []
     finally:
         ctx.close()

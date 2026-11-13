@@ -18,9 +18,15 @@ sample_site.py``; the site cannot reach the Mac, which is behind NAT), asked by 
   PRM_DRAFT_CONTEXT's 对图 does not apply to these orders (approving, 重新预览, the Mac's gate all skip it).
   批准并执行 makes the order and audits it (the Mac's plan ``("create", "audit")``); PRM_SAMPLE_SITE_AUTO=on approves a
   ready one by itself.
-- a general link's submission (the boss posted the link; she typed her 抖音号) goes to the registered creator known by
-  that 抖音号 (the 达人名单, her links, her verified sample orders); nobody: it waits on the site, the admin is told
-  once, and every round looks again (register her / link her 抖音号 and it goes on by itself).
+- a general link's submission (the boss posted the link; whoever opened it typed a 抖音号) goes to the registered
+  creator known by that 抖音号 (the 达人名单, her links, her verified sample orders).  **Nobody checked who typed it**
+  (security review 2026-11-13 #1: anyone holding the link can type a creator's public 抖音号 and their own address),
+  so its draft always needs a person (``GENERAL_NOTE`` on the card, ``needs_attention``) and is NEVER approved by
+  itself, whatever PRM_SAMPLE_SITE_AUTO says.  Nobody on the list: it waits on the site and every round looks again
+  (register her / link her 抖音号 and it goes on by itself); the admin hears of such submissions in one digest at
+  most every ``DIGEST_SEC`` (never one message each, never more of what was typed than a few short 抖音号), and one
+  nobody claimed within PRM_SAMPLE_SITE_UNMATCHED_DAYS is given up and acked, so the site drops its receiver
+  (review #5: fake submissions must not sit there in full for 90 days, nor ring the admin's phone each).
 """
 
 from __future__ import annotations
@@ -52,6 +58,13 @@ OFF_TEXT = "选款网站没打开（设置里 PRM_SAMPLE_SITE_MIN 是 0）"
 GROUP_TEXT = "她现在只能在群里联系：选款链接是她一个人的，不往群里发（私聊能发时再点；要发群里用老板的通用链接）"
 NO_PHOTO_CHECK = "她在选款网站上自己点的款，编码是我们目录里的：不用对图"
 OLD_WORKER = "Mac 的 worker 还是旧版，不认识选款网站的任务：更新代码、重启 Mac 的 worker"
+# A general link's submission: the 抖音号 is whatever the submitter typed (review 2026-11-13 #1)
+GENERAL_NOTE = "通用链接来的：抖音号是她自己填的，没核实；先在私聊和她确认收货信息，再批准（这种单不会自动建）"
+UNMATCHED_DAYS = 7                      # PRM_SAMPLE_SITE_UNMATCHED_DAYS: nobody on the list for this long: given up, acked
+DIGEST_SEC = 6 * 3600                   # the admin hears of unmatched submissions at most this often, in one message
+DIGEST_NAMED = 3                        # ... which names at most this many of the 抖音号 typed
+DIGEST_CHARS = 24                       # ... each cut to this
+GIVEN_UP = "名单里一直没找到这个抖音号的达人，放弃了（网站上的收货信息随后清掉）"
 NO_LINK = "选款链接的草稿里没有链接（Mac 的 worker 还是旧版？更新、重启以后再点一次）"
 _LINK = re.compile(r"https?://[^\s/]+(?:/[^\s]*)?/[sg]/[A-Za-z0-9_-]{20,}")
 _REF = re.compile(r"^p(\d{1,12})$")
@@ -126,6 +139,11 @@ class SampleSite:
         except (TypeError, ValueError):
             self._sec = 0
         self._auto = getattr(config, "prm_sample_site_auto", "off") == "on"
+        try:
+            days = int(getattr(config, "prm_sample_site_unmatched_days", UNMATCHED_DAYS) or UNMATCHED_DAYS)
+        except (TypeError, ValueError):
+            days = UNMATCHED_DAYS
+        self._unmatched_sec = max(1, min(days, 90)) * 86400
         self._lock = threading.RLock()          # one round queued or applied at a time
 
     @property
@@ -291,6 +309,10 @@ class SampleSite:
                         summary["failed"] += 1
                         logger.exception("PRM: a 选款网站 submission (#%d) could not be taken in; read again next round",
                                          sub["id"])
+                try:
+                    self._digest(now)
+                except Exception:
+                    logger.exception("PRM: the admin could not be told of the 选款网站's unmatched submissions")
             svc.store.set_meta_value("site_status", json.dumps({"at": now, "stopped": stopped, **summary},
                                                                 ensure_ascii=False))
         svc._relay.store.replace_result(job["id"], json.dumps({"op": PULL_OP, "summary": summary, "stopped": stopped},
@@ -336,16 +358,20 @@ class SampleSite:
         hats = len(sub["items"])
         party = self._party_of(sub)
         if party is None:
-            told = bool(row and row["told"])
+            # nobody on the list (review 2026-11-13 #5): it waits quietly (the admin hears in a digest, ``_digest``), and
+            # one nobody claimed within PRM_SAMPLE_SITE_UNMATCHED_DAYS is given up: acked next round, so the site
+            # keeps only remnants of whatever was typed
+            first = float(row["created_at"]) if row is not None else now
+            if now - first >= self._unmatched_sec:
+                store.save_site_order(sub["id"], now, ref=sub["ref"], kind=sub["kind"], account=sub["account"],
+                                      state="dropped", hats=hats, why=GIVEN_UP)
+                summary["failed"] += 1
+                logger.info("PRM: 选款网站 submission #%d: nobody on the list for %d day(s); given up, to be acked",
+                            sub["id"], self._unmatched_sec // 86400)
+                return
             store.save_site_order(sub["id"], now, ref=sub["ref"], kind=sub["kind"], account=sub["account"],
                                   state="unmatched", hats=hats)
             summary["unmatched"] += 1
-            if not told:
-                who = f"抖音号 {sub['account']}" if sub["account"] else "一位达人"
-                sent = svc._tell_admin(f"选款网站：{who} 提交了选款（{hats} 顶），名单里没找到她。把她登记进达人名单"
-                                       "（或者在她的合作单里关联这个抖音号）以后，机器人会自己接着起草寄样单。")
-                store.save_site_order(sub["id"], now, told=1 if sent is not False else 0)
-                logger.info("PRM: 选款网站 submission #%d is of nobody on the list (told the admin: %s)", sub["id"], sent)
             return
         deal = store.deal_of(party["id"], now)
         tries = int(row["tries"]) if row is not None and row["state"] in ("failed", "queued") else 0
@@ -382,6 +408,40 @@ class SampleSite:
         summary["orders"] += 1
         logger.info("PRM: 选款网站 submission #%d (party %d, %d hat(s)): job #%d drafts its sample order", sub["id"],
                     party["id"], hats, job_id)
+
+    def _digest(self, now: float) -> None:
+        """Tell the admin's chat of the submissions nobody on the list was found for, the ones not told yet, in ONE
+        message at most every ``DIGEST_SEC``: how many, and at most ``DIGEST_NAMED`` of the 抖音号 typed, each
+        ``DIGEST_CHARS`` at most (only letters, digits, ``_ . -``: ``check_pull``).  Nothing else of what was typed
+        ever gets there (the text is the submitter's: it may be anybody's)."""
+        svc, store = self._svc, self._svc.store
+        rows = [r for r in store.site_orders("unmatched", limit=500) if not r["told"]]
+        if not rows:
+            return
+        try:
+            last = float(store.meta_value("site_digest_at"))
+        except (TypeError, ValueError):
+            last = None
+        if last is not None and 0 <= now - last < DIGEST_SEC:
+            return
+        typed = []
+        for row in rows:
+            account = str(row["account"] or "")[:DIGEST_CHARS]
+            if account and account.lower() not in {t.lower() for t in typed}:
+                typed.append(account)
+        named = "、".join(typed[:DIGEST_NAMED]) + (" 等" if len(typed) > DIGEST_NAMED else "")
+        days = self._unmatched_sec // 86400
+        sent = svc._tell_admin(
+            f"选款网站：有 {len(rows)} 份提交在名单里没找到人" + (f"（填的抖音号：{named}）" if named else "")
+            + "。抖音号是提交的人自己填的，没核实。是我们的达人：把她登记进名单，或者在她的合作单里关联这个抖音号，"
+            f"机器人会接着起草寄样单（要你确认过才建）；{days} 天没对上的自动放弃。")
+        if sent is False:                                # (WeChat did not take it now: said again next round)
+            return
+        store.set_meta_value("site_digest_at", now)
+        for row in rows:
+            store.save_site_order(row["id"], now, told=1)
+        logger.info("PRM: 选款网站: %d submission(s) of nobody on the list said to the admin in one line (sent: %s)",
+                    len(rows), sent)
 
     def _failed(self, site_id: int, party: dict, deal: dict, why: str, now: float, *, tries: int, dropped: bool = False,
                 **fields) -> None:
@@ -445,24 +505,34 @@ class SampleSite:
         ready = block.get("verdict") == "ready"
         why = "" if ready else ("；".join(block.get("problems") or [])
                                 or platforms.VERDICTS.get(block.get("verdict"), ""))[:300]
-        packet_meta = {ORDER: {"id": site_id, "hats": int(row["hats"] or 0), "photo_check": False}}
+        # a general link's (review 2026-11-13 #1): whoever held the link typed the 抖音号; a person looks, always
+        general = row["kind"] == "general"
+        packet_meta = {ORDER: {"id": site_id, "hats": int(row["hats"] or 0), "photo_check": False,
+                               **({"unverified": True} if general else {})}}
         if sheets:
             packet_meta[draft_context.OPERATOR_FILES] = sheets
         packet_id = store.add_packet(
             deal_id=deal["id"], party_id=party["id"], job_id=None, chat_id=party["wxid"], kind="other",
             text=draft.reply_draft, attachments=[], intent=draft.intent, slots={}, stage_proposal="",
-            needs_attention=not ready, reason=(f"平台动作预览没通过：{why}" if not ready else NO_PHOTO_CHECK)[:500],
+            needs_attention=not ready or general,
+            reason="；".join(r for r in (GENERAL_NOTE if general else "", f"平台动作预览没通过：{why}" if not ready else "",
+                                         NO_PHOTO_CHECK) if r)[:500],
             status=PENDING, route=gates.REVIEW, meta=packet_meta, tool="jst.sample_order",
             platform={"action": action, "preview": block}, now=now)
         store.save_site_order(site_id, now, state="drafted", packet_id=packet_id, tries=tries, why="")
         store.add_event(deal["id"], party["id"], ORDER, {"packet": packet_id, "site": site_id,
                                                          "hats": int(row["hats"] or 0)}, actor="mac", now=now)
-        store.set_notice(deal["id"], f"site:{site_id}",
-                         (f"选款网站：她提交的选款（#{site_id}）的寄样单预览没通过：{why}" if not ready else ""), now)
+        store.set_notice(deal["id"], f"site:{site_id}", "；".join(t for t in (
+            f"选款网站：#{site_id} 是通用链接来的提交，抖音号是她自己填的、没核实：先在私聊和她确认收货信息，再到「待审批」批准"
+            if general else "",
+            f"选款网站：她提交的选款（#{site_id}）的寄样单预览没通过：{why}" if not ready else "") if t), now)
         logger.info("PRM: 选款网站 submission #%d -> packet %d (%s; not checked by photo: she picked our codes)",
                     site_id, packet_id, block.get("verdict"))
-        if self._auto and ready:
+        if self._auto and ready and not general:        # (a general link's: never by itself, review 2026-11-13 #1)
             self._approve_by_itself(packet_id, deal, party, now)
+        elif self._auto and ready:
+            logger.info("PRM: packet %d (选款网站) is a general link's: not approved by itself, a person confirms her "
+                        "first", packet_id)
         return True
 
     def _approve_by_itself(self, packet_id: int, deal: dict, party: dict, now: float) -> None:

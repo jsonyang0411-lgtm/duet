@@ -156,12 +156,29 @@ def state_dir(home: Optional[Path] = None) -> Path:
 
 # ── the site's admin API ────────────────────────────────────────────────────
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect (security review 2026-11-13 #9): urllib would send the request again, its
+    ``Authorization`` header with it, to wherever a 3xx points, another host over plain http too."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None                                      # (urllib then raises the 3xx as an HTTPError)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def open_no_redirect(request, timeout):
+    """``urlopen`` that answers a redirect with its HTTPError instead of following it."""
+    return _OPENER.open(request, timeout=timeout)
+
+
 class SiteClient:
-    """The admin API of the site.  ``opener(request, timeout)`` is urllib's by default (tests hand in their own)."""
+    """The admin API of the site.  ``opener(request, timeout)`` is ``open_no_redirect`` by default (tests hand in
+    their own): a redirect is an error (``refused``), never followed."""
 
     def __init__(self, url: str, token: str, timeout: float = 20, opener: Optional[Callable] = None):
         self.url, self._token, self.timeout = url.rstrip("/"), token, timeout
-        self._open = opener or (lambda request, timeout: urllib.request.urlopen(request, timeout=timeout))
+        self._open = opener or open_no_redirect
 
     def _call(self, method: str, path: str, body=None, raw: Optional[bytes] = None, content_type: str = ""):
         data, headers = None, {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
@@ -180,6 +197,9 @@ class SiteClient:
                 said = str(value.get("message") or value.get("error") or "")[:200] if isinstance(value, dict) else ""
             except Exception:
                 pass
+            if 300 <= code < 400:                         # (never followed: the key would go along)
+                raise SiteError("refused", f"选款网站答了一个跳转（{code}）：sample_site.url 要写最终的 https 地址，"
+                                           "机器人不跟着跳（管理密钥不能带去别处）") from None
             if code in (401, 403):
                 raise SiteError("unauthorized", "选款网站不认这台 Mac 的管理密钥（换过密钥？问老板要新的）") from None
             verdict = "refused" if 400 <= code < 500 and code != 429 else "error"
@@ -233,7 +253,7 @@ class SiteClient:
         try:
             with self._open(request, self.timeout) as answer:
                 return answer.read(IMAGE_MAX_BYTES + 1)[:IMAGE_MAX_BYTES]
-        except (urllib.error.URLError, OSError, TimeoutError):
+        except (urllib.error.URLError, OSError, TimeoutError):   # (a redirect too: an HTTPError)
             raise SiteError("unreachable", "选款网站的图片没取到") from None
 
 
@@ -437,8 +457,8 @@ def fetch_picture(url: str, hosts: tuple, timeout: float = 20) -> bytes:
     if parts.scheme != "https" or (parts.hostname or "").lower() not in hosts:
         return b""
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "sample-catalog"}),
-                                    timeout=timeout) as answer:
+        # (no redirect followed here either: the picture comes from one of ``hosts`` or not at all)
+        with open_no_redirect(urllib.request.Request(url, headers={"User-Agent": "sample-catalog"}), timeout) as answer:
             data = answer.read(IMAGE_SOURCE_MAX + 1)
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         return b""

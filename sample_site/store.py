@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS links (
     parent_id INTEGER,
     created_at REAL NOT NULL,
     expires_at REAL NOT NULL,
-    revoked_at REAL
+    revoked_at REAL,
+    origin_nonce TEXT
 );
 CREATE INDEX IF NOT EXISTS links_owner ON links(owner);
 CREATE INDEX IF NOT EXISTS links_parent ON links(parent_id);
@@ -97,10 +98,18 @@ class Store(object):
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
         c.execute("PRAGMA busy_timeout=10000")
+        # Freed and overwritten content is zeroed, and the WAL file is cut back
+        # to nothing after a checkpoint, so page images holding a receiver do
+        # not linger after ack / purge (stock SQLite keeps the WAL at full size).
         c.execute("PRAGMA secure_delete=ON")
+        c.execute("PRAGMA journal_size_limit=0")
         for stmt in SCHEMA.split(";"):
             if stmt.strip():
                 c.execute(stmt)
+        columns = [r[1] for r in c.execute("PRAGMA table_info(links)")]
+        if "origin_nonce" not in columns:  # databases made before 2026-11-13
+            c.execute("ALTER TABLE links ADD COLUMN origin_nonce TEXT")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS links_origin ON links(parent_id, origin_nonce)")
         with self.tx() as cur:
             if self._meta(cur, "secret") is None:
                 self._set_meta(cur, "secret", secrets.token_hex(32))
@@ -115,17 +124,35 @@ class Store(object):
 
     @contextlib.contextmanager
     def tx(self):
-        """A write transaction (BEGIN IMMEDIATE) under the process lock."""
+        """A write transaction (BEGIN IMMEDIATE) under the process lock.
+
+        Whatever fails (the body or the COMMIT itself), the shared connection
+        is left outside any transaction, so later writes keep working.
+        """
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("BEGIN IMMEDIATE")
             try:
                 yield cur
-            except BaseException:
-                cur.execute("ROLLBACK")
-                raise
-            else:
                 cur.execute("COMMIT")
+            except BaseException:
+                self._rollback()
+                raise
+
+    def _rollback(self):
+        try:
+            if self._conn.in_transaction:
+                self._conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+
+    def checkpoint(self):
+        """Copy the WAL into the database and truncate it to zero bytes."""
+        with self._lock:
+            try:
+                return self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            except sqlite3.Error:
+                return None
 
     @contextlib.contextmanager
     def read(self):
@@ -241,10 +268,18 @@ class Store(object):
             return c.lastrowid
 
     def link_by_hash(self, token_hash):
+        """The link with this token hash; ``parent_revoked_at`` says whether the
+        general link it came from was revoked."""
+        cols = ",".join("l." + c for c in LINK_COLUMNS)
         with self.read() as cur:
-            row = cur.execute("SELECT %s FROM links WHERE token_hash=?" % ",".join(LINK_COLUMNS),
-                              (token_hash,)).fetchone()
-        return _row(LINK_COLUMNS, row)
+            row = cur.execute(
+                "SELECT %s, p.revoked_at FROM links l LEFT JOIN links p ON p.id=l.parent_id "
+                "WHERE l.token_hash=?" % cols, (token_hash,)).fetchone()
+        if row is None:
+            return None
+        link = _row(LINK_COLUMNS, row[:len(LINK_COLUMNS)])
+        link["parent_revoked_at"] = row[len(LINK_COLUMNS)]
+        return link
 
     def link_by_id(self, link_id):
         with self.read() as cur:
@@ -314,14 +349,16 @@ class Store(object):
              clean["account"], nonce, now))
 
     def submit_general(self, general, child_hash, clean, nonce, expires_at):
-        """Create the personal link for a general link's submission.
+        """Create the personal link (random token, only its hash stored) for a
+        general link's submission.
 
-        Returns ``"saved"``, ``"duplicate"`` (this nonce made it already) or
-        ``"full"`` (``max_uses`` reached).
+        Returns ``"saved"``, ``"duplicate"`` (this form nonce was submitted
+        already: the first submit wins) or ``"full"`` (``max_uses`` reached).
         """
         now = self.clock()
         with self.tx() as cur:
-            if cur.execute("SELECT 1 FROM links WHERE token_hash=?", (child_hash,)).fetchone():
+            if cur.execute("SELECT 1 FROM links WHERE parent_id=? AND origin_nonce=?",
+                           (general["id"], nonce)).fetchone():
                 return "duplicate"
             row = cur.execute("SELECT uses, max_uses FROM links WHERE id=?", (general["id"],)).fetchone()
             if row is None:
@@ -332,6 +369,7 @@ class Store(object):
             child_id = self.create_link(child_hash, general["ref"], general["owner"], "personal",
                                         general["max_items"], True, None, expires_at,
                                         parent_id=general["id"], cur=cur)
+            cur.execute("UPDATE links SET origin_nonce=? WHERE id=?", (nonce, child_id))
             child = {"id": child_id, "owner": general["owner"]}
             self._insert_sub(cur, child, clean, nonce, now)
             cur.execute("UPDATE links SET uses=uses+1 WHERE id=?", (child_id,))
@@ -371,6 +409,7 @@ class Store(object):
                     cur.execute("UPDATE submissions SET state='acked', acked_at=?, receiver=?, "
                                 "account=NULL WHERE id=?", (now, _dumps(masked), sub_id))
                 acked.append(sub_id)
+        self.checkpoint()
         return acked, unknown
 
     def status(self):
@@ -401,6 +440,7 @@ class Store(object):
                 (link_cutoff, link_cutoff)).fetchall()
             for (link_id,) in dead:
                 cur.execute("DELETE FROM links WHERE id=?", (link_id,))
+        self.checkpoint()
         return len(rows), len(dead)
 
     def try_claim_purge(self, interval):
